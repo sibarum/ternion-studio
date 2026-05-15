@@ -11,23 +11,35 @@ import sibarum.dasum.gui.core.render.Color;
 import sibarum.dasum.gui.core.theme.Themed;
 import sibarum.dasum.gui.core.theme.Variant;
 
+import sibarum.ternion.data.CorpusModel;
 import sibarum.ternion.data.DataPanel;
 import sibarum.ternion.designer.DesignerPanel;
+import sibarum.ternion.designer.GraphSync;
 import sibarum.ternion.train.TrainPanel;
 
 import java.util.List;
 
 public final class MainShell {
 
-    static final Color FRAME_BG   = new Color(0.05f, 0.06f, 0.09f, 1f);
-    static final Color TOOLBAR_BG = new Color(0.13f, 0.14f, 0.18f, 1f);
-    static final Color LABEL_FG   = new Color(1f, 1f, 1f, 0.95f);
+    static final Color FRAME_BG    = new Color(0.05f, 0.06f, 0.09f, 1f);
+    static final Color TOOLBAR_BG  = new Color(0.13f, 0.14f, 0.18f, 1f);
+    static final Color LABEL_FG    = new Color(1f, 1f, 1f, 0.95f);
+    private static final Color DESIGNER_BG = new Color(0.05f, 0.07f, 0.10f, 1f);
 
     public static Component build() {
+        // Build the shared AppContext once — Designer/Data/Train all see
+        // the same GraphSync + CorpusModel state.
+        Component.GraphSurface designerSurface = new Component.GraphSurface(
+            null, null, DESIGNER_BG, List.of(), true, 0);
+        GraphSync graphSync = new GraphSync(designerSurface);
+        graphSync.install();
+        CorpusModel corpus = new CorpusModel();
+        AppContext ctx = new AppContext(designerSurface, graphSync, corpus);
+
         return new Component.Flex(
             null, null, Em.of(0.5f), FRAME_BG,
             Direction.COLUMN, JustifyContent.START, AlignItems.STRETCH, Em.of(0.5f),
-            List.of(buildToolbar(), buildTabs()),
+            List.of(buildToolbar(), buildTabs(ctx)),
             false, 0
         );
     }
@@ -57,16 +69,16 @@ public final class MainShell {
         );
     }
 
-    private static Component buildTabs() {
+    private static Component buildTabs(AppContext ctx) {
         Property<Integer> activeTab = new Property<>(0);
         return Themed.tabs(
             null, null,
             Em.of(2.6f), Em.of(1.0f), Em.of(0.5f),
             Em.of(1.1f),
             List.of(
-                new Component.Tabs.TabPanel("Designer", DesignerPanel.build()),
-                new Component.Tabs.TabPanel("Data",     DataPanel.build()),
-                new Component.Tabs.TabPanel("Train",    TrainPanel.build())
+                new Component.Tabs.TabPanel("Designer", DesignerPanel.build(ctx)),
+                new Component.Tabs.TabPanel("Data",     DataPanel.build(ctx)),
+                new Component.Tabs.TabPanel("Train",    TrainPanel.build(ctx))
             ),
             activeTab,
             Variant.PRIMARY

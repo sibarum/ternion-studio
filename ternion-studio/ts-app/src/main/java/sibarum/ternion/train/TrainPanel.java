@@ -6,6 +6,7 @@ import sibarum.dasum.gui.core.component.Direction;
 import sibarum.dasum.gui.core.component.JustifyContent;
 import sibarum.dasum.gui.core.em.Em;
 import sibarum.dasum.gui.core.render.Color;
+import sibarum.ternion.app.AppContext;
 
 import java.util.List;
 
@@ -14,7 +15,7 @@ public final class TrainPanel {
     private static final Color SURFACE_BG = new Color(0.07f, 0.09f, 0.13f, 1f);
     private static final Color LABEL_FG   = new Color(0.70f, 0.75f, 0.82f, 0.85f);
 
-    public static Component build() {
+    public static Component build(AppContext ctx) {
         Component placeholder = new Component.Text(
             "Train  (Phase 6: training controller + loss chart coming)",
             Em.of(1.0f), LABEL_FG);

@@ -19,6 +19,7 @@ import sibarum.mcc.value.MatrixValue;
 import sibarum.mcc.value.NumberValue;
 import sibarum.mcc.value.Value;
 import sibarum.mcc.value.ValueType;
+import sibarum.ternion.app.AppContext;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -28,10 +29,6 @@ import java.util.List;
  * pane, with a thin top toolbar for a "Run forward" smoke action.
  * Right-click on empty surface area opens the spawn menu; right-click
  * on a node opens its node menu (Delete Node).
- *
- * <p>Phase 3 ships click-spawn via the surface context menu and exec
- * verification via the Run Forward button. The drag-from-palette
- * affordance and properties pane land in Phase 4.
  */
 public final class DesignerPanel {
 
@@ -39,12 +36,9 @@ public final class DesignerPanel {
     private static final Color TOOLBAR_BG = new Color(0.10f, 0.12f, 0.15f, 1f);
     private static final Color LABEL_FG   = new Color(0.92f, 0.94f, 0.97f, 1.00f);
 
-    public static Component build() {
-        Component.GraphSurface surface = new Component.GraphSurface(
-            null, null, SURFACE_BG, List.of(), true, 0);
-
-        GraphSync sync = new GraphSync(surface);
-        sync.install();
+    public static Component build(AppContext ctx) {
+        Component.GraphSurface surface = ctx.designerSurface();
+        GraphSync sync = ctx.graphSync();
 
         wireSurfaceContextMenu(surface, sync);
 
