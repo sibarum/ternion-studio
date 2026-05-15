@@ -41,13 +41,18 @@ public final class DesignerPanel {
         GraphSync sync = ctx.graphSync();
 
         wireSurfaceContextMenu(surface, sync);
+        registerPaletteCommands(sync);
 
         Component toolbar = buildToolbar(sync);
 
+        // Surface was constructed with flexGrow=1 in MainShell so we don't
+        // need (and must not) transform it here. Calling .withFlexGrow would
+        // return a new record instance and orphan every sidecar registration
+        // (right-click, dynamic children) keyed to the original.
         return new Component.Flex(
             null, null, Em.ZERO, TOOLBAR_BG,
             Direction.COLUMN, JustifyContent.START, AlignItems.STRETCH, Em.ZERO,
-            List.of(toolbar, surface.withFlexGrow(1)),
+            List.of(toolbar, surface),
             false, 1
         );
     }
@@ -69,6 +74,20 @@ public final class DesignerPanel {
             List.of(hint, spacer, runBtn),
             false, 0
         );
+    }
+
+    /**
+     * Register one {@code node.spawn.<key>} command per palette item, so
+     * Ctrl+Space's command palette can spawn nodes even when surface
+     * right-click isn't reachable. Each command spawns at (3, 3) em.
+     */
+    private static void registerPaletteCommands(GraphSync sync) {
+        for (PaletteItem item : Palette.items()) {
+            sibarum.dasum.gui.core.command.CommandRegistry.register(
+                "node.spawn." + item.key(),
+                "Spawn: " + item.label(),
+                () -> spawnAndWire(sync, item, 3f, 3f));
+        }
     }
 
     private static void wireSurfaceContextMenu(Component.GraphSurface surface, GraphSync sync) {

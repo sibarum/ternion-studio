@@ -30,8 +30,14 @@ public final class MainShell {
     public static Component build() {
         // Build the shared AppContext once — Designer/Data/Train all see
         // the same GraphSync + CorpusModel state.
+        // flexGrow=1 baked in at construction. NEVER call .withFlexGrow on
+        // this — the Flex/GraphSurface "with*" methods return a new record
+        // instance, which would orphan every sidecar entry (Handlers,
+        // GraphSurfaceChildren, ContextMenuStates) registered on the
+        // original. This silently broke the Designer's right-click + spawn
+        // pipeline before the fix.
         Component.GraphSurface designerSurface = new Component.GraphSurface(
-            null, null, DESIGNER_BG, List.of(), true, 0);
+            null, null, DESIGNER_BG, List.of(), true, 1);
         GraphSync graphSync = new GraphSync(designerSurface);
         graphSync.install();
         CorpusModel corpus = new CorpusModel();
