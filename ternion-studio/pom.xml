@@ -28,24 +28,25 @@
         <native-maven-plugin.version>0.10.6</native-maven-plugin.version>
     </properties>
 
-    <dependencies>
-        <dependency>
-            <groupId>sibarum.dasum.gui</groupId>
-            <artifactId>dasum-gui-shi</artifactId>
-            <version>1.0-SNAPSHOT</version>
-            <type>pom</type>
-        </dependency>
-        <dependency>
-            <groupId>sibarum.mcc</groupId>
-            <artifactId>mandate-carve-compose</artifactId>
-            <version>1.0-SNAPSHOT</version>
-            <type>pom</type>
-        </dependency>
-    </dependencies>
-
     <dependencyManagement>
         <dependencies>
-
+            <!-- https://github.com/sibarum/dasum-gui-shi.git -->
+            <dependency>
+                <groupId>sibarum.dasum.gui</groupId>
+                <artifactId>dasum-core</artifactId>
+                <version>1.0-SNAPSHOT</version>
+            </dependency>
+            <dependency>
+                <groupId>sibarum.dasum.gui</groupId>
+                <artifactId>dasum-glfw</artifactId>
+                <version>1.0-SNAPSHOT</version>
+            </dependency>
+            <!-- https://github.com/sibarum/mandate-carve-compose.git -->
+            <dependency>
+                <groupId>sibarum.mcc</groupId>
+                <artifactId>mcc-core</artifactId>
+                <version>1.0-SNAPSHOT</version>
+            </dependency>
         </dependencies>
     </dependencyManagement>
 

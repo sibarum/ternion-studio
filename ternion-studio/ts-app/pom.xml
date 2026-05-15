@@ -16,6 +16,19 @@
     </properties>
 
     <dependencies>
+        <dependency>
+            <groupId>sibarum.dasum.gui</groupId>
+            <artifactId>dasum-core</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>sibarum.dasum.gui</groupId>
+            <artifactId>dasum-glfw</artifactId>
+            <scope>runtime</scope>
+        </dependency>
+        <dependency>
+            <groupId>sibarum.mcc</groupId>
+            <artifactId>mcc-core</artifactId>
+        </dependency>
     </dependencies>
 
     <build>
