@@ -12,7 +12,7 @@
     <artifactId>ts-app</artifactId>
 
     <properties>
-        <main.class>TBD</main.class>
+        <main.class>sibarum.ternion.app.TsApp</main.class>
     </properties>
 
     <dependencies>
@@ -29,6 +29,12 @@
             <groupId>sibarum.mcc</groupId>
             <artifactId>mcc-core</artifactId>
         </dependency>
+        <dependency>
+            <groupId>org.junit.jupiter</groupId>
+            <artifactId>junit-jupiter</artifactId>
+            <version>5.11.4</version>
+            <scope>test</scope>
+        </dependency>
     </dependencies>
 
     <build>
@@ -39,7 +45,7 @@
                 <version>3.5.0</version>
                 <configuration>
                     <mainClass>${main.class}</mainClass>
-                    <executable>java</executable>
+                    <executable>${java.home}/bin/java</executable>
                     <arguments>
                         <argument>--enable-native-access=ALL-UNNAMED</argument>
                         <argument>-classpath</argument>
@@ -102,7 +108,7 @@
                         </executions>
                         <configuration>
                             <mainClass>${main.class}</mainClass>
-                            <imageName>dasum-mvp-demo</imageName>
+                            <imageName>ternion-studio</imageName>
                             <!-- All build args live in native-image.properties (under
                                  src/main/resources/META-INF/native-image/...) so they're
                                  picked up automatically and not duplicated here. -->
