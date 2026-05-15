@@ -16,6 +16,7 @@ import sibarum.ternion.data.DataPanel;
 import sibarum.ternion.designer.DesignerPanel;
 import sibarum.ternion.designer.GraphSync;
 import sibarum.ternion.train.TrainPanel;
+import sibarum.ternion.train.TrainingController;
 
 import java.util.List;
 
@@ -35,6 +36,7 @@ public final class MainShell {
         graphSync.install();
         CorpusModel corpus = new CorpusModel();
         AppContext ctx = new AppContext(designerSurface, graphSync, corpus);
+        ctx.attachTrainingController(new TrainingController(ctx));
 
         return new Component.Flex(
             null, null, Em.of(0.5f), FRAME_BG,
