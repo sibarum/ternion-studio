@@ -23,7 +23,7 @@ import java.util.List;
  */
 public final class ExampleRow {
 
-    public static final float ROW_HEIGHT_EM = 2.1f;
+    public static final float ROW_HEIGHT_EM = 2.4f;
 
     private static final Color CELL_BG    = new Color(0.10f, 0.12f, 0.16f, 1f);
     private static final Color CELL_FG    = new Color(0.92f, 0.94f, 0.97f, 1f);
@@ -85,13 +85,23 @@ public final class ExampleRow {
         );
     }
 
-    private static Component editableCell(Em width, String initial,
+    private static Component editableCell(Em cellWidth, String initial,
                                           java.util.function.Consumer<String> onChange) {
+        // Give the Text an explicit width (cell interior) so its hit-rect
+        // covers the entire cell horizontally even when empty. Pair with
+        // AlignItems.STRETCH on the parent so the Text rect also fills the
+        // cell vertically — otherwise the rect collapses to the glyph's
+        // intrinsic height and the user has to click on a thin strip mid-
+        // cell to focus. Trim the Text's own padding to 0.1em so the
+        // clip rect doesn't eat below-baseline descenders ('g', 'y',
+        // 'p') at a cell height that needs to stay compact.
+        float pad = 0.3f;  // cell-side padding in em (matches CELL pad below)
+        Em textWidth = Em.of(Math.max(0.5f, cellWidth.value() - 2f * pad));
         Component.Text text = new Component.Text(
             initial,
             sibarum.dasum.gui.core.text.FontGroups.DEFAULT,
             Em.of(0.95f), CELL_FG,
-            null, null, Em.of(0.4f),
+            textWidth, null, Em.of(0.1f),
             null, true,
             true, true, true, false, 0
         );
@@ -100,8 +110,8 @@ public final class ExampleRow {
         // fires the same listener; we don't call setContent in this path).
         TextStates.onContentChange(text, onChange);
         return new Component.Flex(
-            width, Em.of(ROW_HEIGHT_EM - 0.2f), Em.of(0.3f), CELL_BG,
-            Direction.ROW, JustifyContent.START, AlignItems.CENTER, Em.ZERO,
+            cellWidth, Em.of(ROW_HEIGHT_EM - 0.2f), Em.of(pad), CELL_BG,
+            Direction.ROW, JustifyContent.START, AlignItems.STRETCH, Em.ZERO,
             List.of(text), false, 0
         );
     }

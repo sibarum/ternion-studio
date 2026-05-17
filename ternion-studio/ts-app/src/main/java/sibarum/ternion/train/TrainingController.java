@@ -14,6 +14,7 @@ import sibarum.mcc.value.MatrixValue;
 import sibarum.mcc.value.NumberValue;
 import sibarum.mcc.value.Value;
 import sibarum.ternion.app.AppContext;
+import sibarum.ternion.designer.FrozenNodes;
 import sibarum.ternion.designer.NodeSpec;
 
 import java.util.HashMap;
@@ -82,6 +83,10 @@ public final class TrainingController {
     private final IdentityHashMap<Object, Trainable> pendingSteps = new IdentityHashMap<>();
     private Iterator<Example> currentIterator;
     private Corpus currentCorpus;
+    /** Nodes from the most recent successful example's graph snapshot. Used
+     *  by {@link #applyPendingSteps} to freeze participants at epoch end
+     *  in accumulate mode (where the graph isn't otherwise reachable). */
+    private List<CompGraphNode> lastParticipants = List.of();
 
     public TrainingController(AppContext ctx) {
         this.ctx = ctx;
@@ -107,6 +112,17 @@ public final class TrainingController {
         try {
             if (state.get() == TrainingState.RUNNING) return;
             if (state.get() != TrainingState.IDLE && state.get() != TrainingState.STOPPED) return;
+
+            // Pre-flight: surface obvious misconfigurations before spinning
+            // up the worker thread. Saves the user from staring at an
+            // unchanging UI while the loop discovers the same problem.
+            String preflight = validateBeforeStart();
+            if (preflight != null) {
+                lastError.set(preflight);
+                sibarum.dasum.gui.core.status.Status.error("Training can't start: " + preflight);
+                return;
+            }
+
             lastError.set("");
             pendingSteps.clear();
             currentIterator = null;
@@ -119,6 +135,49 @@ public final class TrainingController {
         } finally {
             lock.unlock();
         }
+    }
+
+    /**
+     * Run the cheap pre-flight checks before spawning the worker thread.
+     * Returns {@code null} if everything is set up; otherwise a short
+     * human-readable description of the first problem found.
+     */
+    private String validateBeforeStart() {
+        CompGraphNode terminal = null;
+        for (NodeSpec spec : ctx.graphSync().liveNodes()) {
+            if (spec.tNode().primitive() instanceof Terminal) {
+                terminal = spec.cgNode();
+                break;
+            }
+        }
+        if (terminal == null) {
+            return "no Terminal node in the graph";
+        }
+        // Probe a fresh corpus snapshot. Empty corpus is fine for paused
+        // exploration but useless for training — surface the warning so
+        // the user knows nothing will happen.
+        Corpus corpus = ctx.corpus().toCorpus();
+        if (corpus.size() == 0) {
+            return "no examples in the corpus — populate the Data tab first";
+        }
+        // Verify the graph topology can execute: every non-wired slot
+        // must be a corpus root binding. We snapshot the graph and walk
+        // each node's slot list.
+        ComputationGraph snapshot = ctx.graphSync().snapshot(terminal);
+        java.util.Set<String> rootKeys = new java.util.HashSet<>();
+        Iterator<Example> it = corpus.stream();
+        if (it.hasNext()) rootKeys.addAll(it.next().inputs().keySet());
+        for (CompGraphNode n : snapshot.nodes()) {
+            for (int i = 0; i < n.slotCount(); i++) {
+                if (n.slot(i) != null) continue;
+                String key = n.id() + "#" + i;
+                if (!rootKeys.contains(key)) {
+                    return "slot " + i + " of '" + n.id() + "' is unwired"
+                        + " and has no matching corpus input (key '" + key + "')";
+                }
+            }
+        }
+        return null;
     }
 
     public void pause() {
@@ -217,7 +276,10 @@ public final class TrainingController {
                 try {
                     runOneExample(ex);
                 } catch (RuntimeException e) {
-                    lastError.set(failureMessage(e));
+                    String msg = failureMessage(e);
+                    lastError.set(msg);
+                    sibarum.dasum.gui.core.status.Status.error(
+                        "Training stopped: " + msg, stackTraceOf(e));
                     state.set(TrainingState.STOPPED);
                     atRest.set(true);
                     return;
@@ -294,7 +356,13 @@ public final class TrainingController {
             if (gradAtN == null) continue;
             if (!(p instanceof Differentiable diff)) continue;
 
-            List<Value> inputGrads = diff.backward(gradAtN);
+            List<Value> inputGrads;
+            try {
+                inputGrads = diff.backward(gradAtN);
+            } catch (RuntimeException backErr) {
+                throw new RuntimeException(
+                    "node '" + n.id() + "' (" + p.name() + ") backward: " + backErr.getMessage(), backErr);
+            }
             if (p instanceof Trainable t) {
                 pendingSteps.put(t.trainableIdentity(), t);
             }
@@ -308,6 +376,7 @@ public final class TrainingController {
             }
         }
         nodeRuntime.publish();
+        lastParticipants = List.copyOf(graph.nodes());
 
         if (stepEveryExample.get()) {
             applyPendingSteps();
@@ -318,12 +387,22 @@ public final class TrainingController {
         currentExample.set(currentExample.get() + 1);
     }
 
+    /**
+     * Apply accumulated trainable steps. When at least one Trainable was
+     * actually stepped, every node that participated in the most recent
+     * successful example freezes — its structural config can no longer be
+     * edited in place without first deleting the node.
+     */
     private void applyPendingSteps() {
+        boolean stepped = !pendingSteps.isEmpty();
         double lr = learningRate.get();
         for (Trainable t : pendingSteps.values()) {
             t.step(lr);
         }
         pendingSteps.clear();
+        if (stepped) {
+            FrozenNodes.markAll(lastParticipants);
+        }
     }
 
     // ---------- helpers ----------
@@ -420,6 +499,12 @@ public final class TrainingController {
     private static String failureMessage(Throwable t) {
         String msg = t.getMessage();
         return msg == null ? t.getClass().getSimpleName() : msg;
+    }
+
+    private static String stackTraceOf(Throwable t) {
+        java.io.StringWriter sw = new java.io.StringWriter();
+        t.printStackTrace(new java.io.PrintWriter(sw));
+        return sw.toString();
     }
 
     private static void sleep(long ms) {

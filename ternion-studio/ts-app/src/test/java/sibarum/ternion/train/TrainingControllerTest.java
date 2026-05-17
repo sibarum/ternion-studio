@@ -79,7 +79,7 @@ final class TrainingControllerTest {
         // them as constructed values via a custom CorpusModel-bypass
         // path.
         NodeSpec p2  = sync2.spawn(Palette.byKey("input.parameter.matrix4"), 0f, 0f);
-        NodeSpec lin = sync2.spawn(Palette.byKey("linear.linear_4_4"),       4f, 0f);
+        NodeSpec lin = sync2.spawn(Palette.byKey("linear.linear"),           4f, 0f);
         NodeSpec t2  = sync2.spawn(Palette.byKey("output.terminal.matrix"),  8f, 0f);
         Connections.add(s2, p2.outputPort(),  lin.orderedInputPorts().get(0));
         Connections.add(s2, lin.outputPort(), t2.orderedInputPorts().get(0));
@@ -98,17 +98,18 @@ final class TrainingControllerTest {
         TrainingController controller2 = new TrainingController(ctx2);
         ctx2.attachTrainingController(controller2);
 
-        // Train with empty parsed corpus — controller should sit at IDLE→
-        // RUNNING but nextExample returns null so it sleeps. Pause and
-        // stop should still work; this verifies the state machine on
-        // an edge case.
+        // MATRIX targets aren't parseable by the corpus editor, so
+        // corpus.toCorpus() yields 0 examples. The Phase 10 preflight
+        // refuses to start training in that case; state stays IDLE and
+        // lastError carries an explanation.
         controller2.start();
-        Thread.sleep(150);
-        assertTrue(controller2.state().get() == TrainingState.RUNNING
-                || controller2.state().get() == TrainingState.STOPPED,
-            "controller transitioned out of IDLE");
+        assertEquals(TrainingState.IDLE, controller2.state().get(),
+            "preflight blocks start when corpus is empty");
+        assertTrue(controller2.lastError().get().contains("corpus"),
+            "lastError mentions the empty corpus, got: " + controller2.lastError().get());
         controller2.stop();
-        assertEquals(TrainingState.STOPPED, controller2.state().get());
+        assertEquals(TrainingState.IDLE, controller2.state().get(),
+            "stop after a refused start is a no-op");
     }
 
     @Test

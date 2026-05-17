@@ -2,10 +2,12 @@ package sibarum.ternion.data;
 
 import sibarum.dasum.gui.core.event.Invalidator;
 import sibarum.dasum.gui.core.reactive.Property;
+import sibarum.dasum.gui.core.status.Status;
 import sibarum.mcc.graph.CompGraphNode;
 import sibarum.mcc.graph.SlotSource;
 import sibarum.mcc.training.Corpus;
 import sibarum.mcc.training.Example;
+import sibarum.mcc.value.MatrixValue;
 import sibarum.mcc.value.NumberValue;
 import sibarum.mcc.value.StringValue;
 import sibarum.mcc.value.Value;
@@ -117,6 +119,29 @@ public final class CorpusModel {
         return r;
     }
 
+    /** Build a Row populated from save-file fields, without registering it. */
+    public Row newRow(String label, Map<String, String> inputs, String target) {
+        Row r = new Row(label == null ? "" : label, target == null ? "" : target);
+        if (inputs != null) r.inputStrings.putAll(inputs);
+        return r;
+    }
+
+    /** Replace the entire row list in one structural bump. Used by load. */
+    public void replaceAll(List<Row> newRows) {
+        rows.clear();
+        rows.addAll(newRows);
+        bumpStructure();
+    }
+
+    /** Clear rows + schema. Used by New project. */
+    public void clearAll() {
+        rows.clear();
+        inputSchema = List.of();
+        targetSchema = new TargetSchema(ValueType.NUMBER);
+        name = "corpus";
+        bumpStructure();
+    }
+
     public void removeRow(int index) {
         if (index < 0 || index >= rows.size()) return;
         rows.remove(index);
@@ -153,6 +178,8 @@ public final class CorpusModel {
      */
     public Corpus toCorpus() {
         List<Example> examples = new ArrayList<>(rows.size());
+        int dropped = 0;
+        String firstError = null;
         for (Row r : rows) {
             try {
                 Map<String, Value> inputs = new LinkedHashMap<>();
@@ -163,8 +190,18 @@ public final class CorpusModel {
                 Value target = parse(targetSchema.type(), r.targetString);
                 examples.add(new Example(r.label, inputs, target));
             } catch (RuntimeException ex) {
+                dropped++;
+                if (firstError == null) {
+                    firstError = "row '" + r.label + "': " + ex.getMessage();
+                }
                 System.out.println("[corpus] skipped row '" + r.label + "': " + ex.getMessage());
             }
+        }
+        if (dropped > 0) {
+            String summary = dropped == 1
+                ? "Corpus: skipped 1 row — " + firstError
+                : "Corpus: skipped " + dropped + " rows; first was " + firstError;
+            Status.warn(summary);
         }
         String snapName = name;
         long snapSize = examples.size();
@@ -182,9 +219,12 @@ public final class CorpusModel {
 
     private static String defaultStringFor(ValueType t) {
         return switch (t) {
-            case STRING -> "";
-            case NUMBER -> "0";
-            default -> "";
+            case STRING     -> "";
+            case NUMBER     -> "0";
+            case MATRIX     -> "0, 0, 0, 0";  // dim 4 — matches the palette's default Linear / Parameter
+            case TERNION    -> "0, 0, 0";
+            case QUATERNION -> "0, 0, 0, 0";
+            default         -> "";
         };
     }
 
@@ -206,8 +246,38 @@ public final class CorpusModel {
                     throw new IllegalArgumentException("not a NUMBER: '" + raw + "'");
                 }
             }
+            case MATRIX, TERNION, QUATERNION -> new MatrixValue(parseFloats(raw));
             default -> throw new IllegalArgumentException(
-                "MVP data editor only parses STRING / NUMBER; got " + t);
+                "data editor doesn't yet parse " + t + " — supported: STRING, NUMBER, MATRIX, TERNION, QUATERNION");
         };
+    }
+
+    /**
+     * Parse a comma-separated list of doubles. Whitespace and surrounding
+     * brackets / parens are tolerated. Empty or all-whitespace input
+     * yields an empty array (caller may decide if that's valid).
+     */
+    private static double[] parseFloats(String raw) {
+        if (raw == null) return new double[0];
+        String s = raw.trim();
+        if (s.isEmpty()) return new double[0];
+        // Tolerate "[1, 2, 3]" or "(1 2 3)" — strip surrounding bracket pairs.
+        if ((s.startsWith("[") && s.endsWith("]"))
+                || (s.startsWith("(") && s.endsWith(")"))
+                || (s.startsWith("{") && s.endsWith("}"))) {
+            s = s.substring(1, s.length() - 1).trim();
+            if (s.isEmpty()) return new double[0];
+        }
+        String[] parts = s.split("[\\s,]+");
+        double[] out = new double[parts.length];
+        for (int i = 0; i < parts.length; i++) {
+            try {
+                out[i] = Double.parseDouble(parts[i]);
+            } catch (NumberFormatException nfe) {
+                throw new IllegalArgumentException(
+                    "matrix entry " + i + " not a number: '" + parts[i] + "' (use comma- or space-separated numbers, e.g. \"1, 2, 3, 4\")");
+            }
+        }
+        return out;
     }
 }

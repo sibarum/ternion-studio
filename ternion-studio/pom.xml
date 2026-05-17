@@ -41,6 +41,11 @@
                 <artifactId>dasum-glfw</artifactId>
                 <version>1.0-SNAPSHOT</version>
             </dependency>
+            <dependency>
+                <groupId>sibarum.dasum.gui</groupId>
+                <artifactId>dasum-nfd</artifactId>
+                <version>1.0-SNAPSHOT</version>
+            </dependency>
             <!-- https://github.com/sibarum/mandate-carve-compose.git -->
             <dependency>
                 <groupId>sibarum.mcc</groupId>

@@ -9,9 +9,14 @@ import sibarum.dasum.gui.core.event.Invalidator;
 import sibarum.dasum.gui.core.input.ContextMenuItem;
 import sibarum.dasum.gui.core.input.Handlers;
 import sibarum.dasum.gui.core.input.PortContextMenu;
+import sibarum.dasum.gui.core.input.TextStates;
 import sibarum.dasum.gui.core.render.Color;
+import sibarum.dasum.gui.core.status.Status;
 import sibarum.dasum.gui.core.theme.Themed;
 import sibarum.dasum.gui.core.theme.Variant;
+import sibarum.ternion.designer.config.ConfigDialog;
+import sibarum.ternion.designer.config.ConfigField;
+import sibarum.ternion.train.NodeRuntime;
 import sibarum.mcc.graph.CompGraphNode;
 import sibarum.mcc.graph.ComputationGraph;
 import sibarum.mcc.op.Terminal;
@@ -23,6 +28,7 @@ import sibarum.ternion.app.AppContext;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 
 /**
  * Designer tab. Hosts a {@link Component.GraphSurface} that fills the
@@ -42,6 +48,7 @@ public final class DesignerPanel {
 
         wireSurfaceContextMenu(surface, sync);
         registerPaletteCommands(sync);
+        wireNodeRuntimeUpdates(ctx);
 
         Component toolbar = buildToolbar(sync);
 
@@ -77,6 +84,65 @@ public final class DesignerPanel {
     }
 
     /**
+     * Wire the controller's {@link NodeRuntime} to each spawned node's
+     * preview Text. The training worker bumps the version per example;
+     * we throttle to ~60Hz so very fast training (thousands of examples
+     * per second on tiny graphs) doesn't dominate the render thread
+     * with TextStates churn. State-change events on the controller
+     * trigger a forced refresh so the post-stop frame is always
+     * consistent.
+     */
+    private static void wireNodeRuntimeUpdates(AppContext ctx) {
+        NodeRuntime runtime = ctx.trainingController().nodeRuntime();
+        long[] lastNs = { 0L };
+        long minIntervalNs = 16_000_000L;
+        Runnable refresh = () -> {
+            updateNodePreviews(ctx.graphSync(), runtime);
+            FrozenBadge.refresh(ctx.graphSync());
+        };
+
+        runtime.version().subscribe(v -> {
+            long now = System.nanoTime();
+            if (now - lastNs[0] < minIntervalNs) return;
+            lastNs[0] = now;
+            refresh.run();
+        });
+        ctx.trainingController().state().subscribe(s -> {
+            // Force-refresh on training state transitions (start/stop)
+            // so the user always sees the final post-step values, not a
+            // throttle-skipped intermediate snapshot.
+            lastNs[0] = 0L;
+            refresh.run();
+        });
+    }
+
+    private static void updateNodePreviews(GraphSync sync, NodeRuntime runtime) {
+        for (NodeSpec spec : sync.liveNodes()) {
+            NodeRuntime.Snapshot snap = runtime.of(spec.cgNode());
+            String text = formatPreview(snap);
+            TextStates.setContent(spec.previewText(), text);
+        }
+    }
+
+    private static String formatPreview(NodeRuntime.Snapshot snap) {
+        if (snap == null) return "";
+        if ((snap.preview() == null || snap.preview().isEmpty()) && snap.gradMagnitude() == 0.0) {
+            return "";
+        }
+        if (snap.gradMagnitude() == 0.0) {
+            return snap.preview();
+        }
+        return snap.preview() + "  ∇ " + formatGrad(snap.gradMagnitude());
+    }
+
+    private static String formatGrad(double mag) {
+        if (mag == 0.0)            return "0";
+        if (mag < 1e-4)            return String.format("%.2e", mag);
+        if (mag < 10.0)            return String.format("%.4f", mag);
+        return String.format("%.2f", mag);
+    }
+
+    /**
      * Register one {@code node.spawn.<key>} command per palette item, so
      * Ctrl+Space's command palette can spawn nodes even when surface
      * right-click isn't reachable. Each command spawns at (3, 3) em.
@@ -105,17 +171,48 @@ public final class DesignerPanel {
     }
 
     private static void spawnAndWire(GraphSync sync, PaletteItem palette, float emX, float emY) {
-        NodeSpec spec = sync.spawn(palette, emX, emY);
+        if (palette.configSchema().isEmpty()) {
+            finalizeSpawn(sync, palette, emX, emY, Map.of());
+            return;
+        }
+        ConfigDialog.show(
+            "Configure: " + palette.label(),
+            palette.configSchema(),
+            ConfigField.defaultsOf(palette.configSchema()),
+            cfg -> finalizeSpawn(sync, palette, emX, emY, cfg));
+    }
+
+    private static void finalizeSpawn(GraphSync sync, PaletteItem palette,
+                                      float emX, float emY, Map<String, Object> config) {
+        NodeSpec spec = sync.spawn(palette, emX, emY, config);
         wireNodeContextMenu(sync, spec);
         PortContextMenu.registerDefaults(spec.visual());
         Invalidator.invalidate();
     }
 
     private static void wireNodeContextMenu(GraphSync sync, NodeSpec spec) {
-        Handlers.onContextMenu(spec.visual(), event -> List.of(
-            new ContextMenuItem("Delete Node",
-                () -> sync.removeNode(spec.visual()))
-        ));
+        Handlers.onContextMenu(spec.visual(), event -> {
+            List<ContextMenuItem> items = new ArrayList<>();
+            PaletteItem palette = Palette.byKey(spec.paletteKey());
+            if (palette != null && !palette.configSchema().isEmpty()) {
+                items.add(new ContextMenuItem("Properties…",
+                    () -> showProperties(spec, palette)));
+            }
+            items.add(new ContextMenuItem("Delete Node",
+                () -> sync.removeNode(spec.visual())));
+            return items;
+        });
+    }
+
+    private static void showProperties(NodeSpec spec, PaletteItem palette) {
+        String reason = FrozenNodes.isFrozen(spec)
+            ? "Frozen by training — delete and re-create to change."
+            : "Read-only — delete and re-create to change. (Editable Properties is a follow-up.)";
+        ConfigDialog.showReadOnly(
+            "Properties: " + palette.label(),
+            palette.configSchema(),
+            spec.config(),
+            reason);
     }
 
     /**
@@ -127,17 +224,25 @@ public final class DesignerPanel {
     private static void runForward(GraphSync sync) {
         NodeSpec terminalSpec = findTerminal(sync);
         if (terminalSpec == null) {
-            System.out.println("[run] no Terminal node in graph");
+            Status.error("Run Forward: no Terminal node in graph",
+                "Spawn a Terminal node via right-click or Ctrl+Space before running.");
             return;
         }
         try {
             ComputationGraph graph = sync.snapshot(terminalSpec.cgNode());
             bindUnwiredSlots(sync, graph);
             Value out = graph.execute();
-            System.out.println("[run] output = " + formatValue(out));
+            Status.info("Run forward: " + formatValue(out));
         } catch (Exception e) {
-            System.out.println("[run] failed: " + e.getMessage());
+            Status.error("Run forward failed: " + e.getMessage(),
+                stackTraceOf(e));
         }
+    }
+
+    private static String stackTraceOf(Throwable t) {
+        java.io.StringWriter sw = new java.io.StringWriter();
+        t.printStackTrace(new java.io.PrintWriter(sw));
+        return sw.toString();
     }
 
     private static NodeSpec findTerminal(GraphSync sync) {

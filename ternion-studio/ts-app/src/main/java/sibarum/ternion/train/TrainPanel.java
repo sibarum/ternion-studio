@@ -43,12 +43,12 @@ public final class TrainPanel {
         Component controls = buildControls(controller);
         Component params   = buildParameters(controller);
         Component status   = buildStatus(controller);
-        Component chartPlaceholder = buildChartPlaceholder();
+        Component chart    = LossChart.build(controller);
 
         return new Component.Flex(
             null, null, Em.of(0.8f), SURFACE_BG,
             Direction.COLUMN, JustifyContent.START, AlignItems.STRETCH, Em.of(0.8f),
-            List.of(controls, params, status, chartPlaceholder),
+            List.of(controls, params, status, chart),
             false, 1
         );
     }
@@ -174,18 +174,6 @@ public final class TrainPanel {
             Em.of(0.9f), fg,
             null, null, Em.ZERO, null, false,
             false, false, false, false, 0);
-    }
-
-    private static Component buildChartPlaceholder() {
-        Component label = new Component.Text(
-            "Loss chart lands in Phase 7. Watch the status line above for live loss while training.",
-            Em.of(0.9f), HINT_FG);
-        return new Component.Flex(
-            null, null, Em.of(1.0f), SURFACE_BG,
-            Direction.COLUMN, JustifyContent.CENTER, AlignItems.CENTER, Em.ZERO,
-            List.of(label),
-            false, 1
-        );
     }
 
     private TrainPanel() {}

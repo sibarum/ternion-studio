@@ -3,3 +3,6 @@ target/
 *.iml
 .mvn/
 .claude/
+*.log
+/dasum-gui-shi/nativefiledialog-extended/
+/dasum-gui-shi/nativefiledialog-extended/build

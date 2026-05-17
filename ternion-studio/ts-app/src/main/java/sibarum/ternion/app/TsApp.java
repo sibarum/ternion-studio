@@ -34,6 +34,7 @@ import sibarum.dasum.gui.core.render.Batcher;
 import sibarum.dasum.gui.core.render.Projection;
 import sibarum.dasum.gui.core.render.RenderStats;
 import sibarum.dasum.gui.core.render.Texture;
+import sibarum.dasum.gui.core.status.Status;
 import sibarum.dasum.gui.core.text.AtlasData;
 import sibarum.dasum.gui.core.text.FontGroup;
 import sibarum.dasum.gui.core.text.FontGroups;
@@ -55,7 +56,7 @@ public final class TsApp {
     private static Component pressTarget = null;
 
     public static void main(String[] args) {
-        try (GlfwContext ctx = GlfwContext.init();
+        try (GlfwContext glfwCtx = GlfwContext.init();
              Window window = Window.create(1280, 800, "Ternion Studio");
              Batcher batcher = new Batcher();
              CursorManager cursors = new CursorManager(window.handle().address())) {
@@ -69,9 +70,14 @@ public final class TsApp {
                 AtlasData primaryAtlas = AtlasData.loadFromResource("/dasum/atlas/primary.json");
                 FontGroups.register(FontGroup.of(FontGroups.DEFAULT, primaryAtlas, primaryTexture));
 
-                Component root = MainShell.build();
-                wireInput(window, cursors);
-                registerCommands(window);
+                MainShell.Built built = MainShell.build();
+                Component root = Status.wrap(built.root());
+                AppContext ctx = built.ctx();
+                ctx.attachWindow(window);
+                Status.setDefaultMessage(
+                    "Ctrl+S: save · Ctrl+O: open · Ctrl+N: new · Space: pause/resume training · Ctrl+Space: commands");
+                wireInput(window, cursors, ctx);
+                registerCommands(window, ctx);
 
                 RenderStats stats = new RenderStats();
                 System.out.println("Ternion Studio — Designer / Data / Train. Ctrl+Space for commands; Ctrl+=/- zoom.");
@@ -120,7 +126,7 @@ public final class TsApp {
         }
     }
 
-    private static void wireInput(Window window, CursorManager cursors) {
+    private static void wireInput(Window window, CursorManager cursors, AppContext ctx) {
         GlfwCallbacks.setKeyListener((win, key, scancode, action, mods) -> {
             if (action != Glfw.GLFW_PRESS && action != Glfw.GLFW_REPEAT) return;
             boolean ctrl  = (mods & Glfw.GLFW_MOD_CONTROL) != 0;
@@ -142,6 +148,21 @@ public final class TsApp {
                 else       { if (TextInputController.onUndo()) return; }
             }
             if (ctrl && key == 'Y') { if (TextInputController.onRedo()) return; }
+
+            // Project shortcuts. After the clipboard/undo group so editable
+            // text keeps its standard editing keys.
+            if (ctrl && key == 'S' && !shift) { MainShell.triggerSave(ctx); return; }
+            if (ctrl && key == 'O' && !shift) { MainShell.triggerOpen(ctx); return; }
+            if (ctrl && key == 'N' && !shift) { MainShell.triggerNew(ctx);  return; }
+
+            // Space toggles training pause/resume — only when focus isn't on
+            // an editable text (so corpus cells can type spaces normally).
+            if (key == Glfw.GLFW_KEY_SPACE && !ctrl) {
+                Component focused = FocusState.focused();
+                boolean focusedIsEditableText =
+                    (focused instanceof Component.Text t) && t.editable();
+                if (!focusedIsEditableText && toggleTrainingPause(ctx)) return;
+            }
 
             if (key == Glfw.GLFW_KEY_BACKSPACE && TextInputController.onBackspace(ctrl)) return;
             if (key == Glfw.GLFW_KEY_DELETE    && TextInputController.onDelete(ctrl))    return;
@@ -333,15 +354,36 @@ public final class TsApp {
         });
     }
 
-    private static void registerCommands(Window window) {
+    private static void registerCommands(Window window, AppContext ctx) {
         CommandRegistry.register("zoom.in",     "Zoom In",         () -> EmContext.multiplyZoom(1.1f));
         CommandRegistry.register("zoom.out",    "Zoom Out",        () -> EmContext.multiplyZoom(1f / 1.1f));
         CommandRegistry.register("zoom.reset",  "Reset Zoom",      () -> EmContext.setZoom(1f));
         CommandRegistry.register("focus.clear", "Clear Focus",     FocusState::clear);
+        CommandRegistry.register("project.new",  "Project: New",     () -> MainShell.triggerNew(ctx));
+        CommandRegistry.register("project.open", "Project: Open…",   () -> MainShell.triggerOpen(ctx));
+        CommandRegistry.register("project.save", "Project: Save…",   () -> MainShell.triggerSave(ctx));
+        CommandRegistry.register("train.toggle", "Training: Toggle pause/resume",
+            () -> toggleTrainingPause(ctx));
         CommandRegistry.register("quit",        "Quit",            () -> {
             Glfw.glfwSetWindowShouldClose(window.handle(), true);
             Invalidator.invalidate();
         });
+    }
+
+    /**
+     * Space-bound training toggle. Returns true if the key was consumed
+     * (some training-state transition happened or training is currently
+     * relevant), false otherwise — caller falls through to other Space
+     * handlers (focus activation, etc.).
+     */
+    private static boolean toggleTrainingPause(AppContext ctx) {
+        sibarum.ternion.train.TrainingController c = ctx.trainingController();
+        switch (c.state().get()) {
+            case IDLE, STOPPED -> { c.start(); return true; }
+            case RUNNING       -> { c.pause(); return true; }
+            case PAUSED        -> { c.resume(); return true; }
+        }
+        return false;
     }
 
     private static CursorManager.CursorShape cursorShapeFor(Component hit) {

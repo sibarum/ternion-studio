@@ -1,8 +1,10 @@
 package sibarum.ternion.app;
 
 import sibarum.dasum.gui.core.component.Component;
+import sibarum.dasum.gui.core.window.Window;
 import sibarum.ternion.data.CorpusModel;
 import sibarum.ternion.designer.GraphSync;
+import sibarum.ternion.project.Project;
 import sibarum.ternion.train.TrainingController;
 
 /**
@@ -19,7 +21,9 @@ public final class AppContext {
     private final Component.GraphSurface designerSurface;
     private final GraphSync graphSync;
     private final CorpusModel corpus;
+    private final Project project = new Project();
     private TrainingController trainingController;
+    private Window window;
 
     public AppContext(Component.GraphSurface designerSurface, GraphSync graphSync, CorpusModel corpus) {
         this.designerSurface = designerSurface;
@@ -30,6 +34,7 @@ public final class AppContext {
     public Component.GraphSurface designerSurface() { return designerSurface; }
     public GraphSync graphSync() { return graphSync; }
     public CorpusModel corpus() { return corpus; }
+    public Project project() { return project; }
     public TrainingController trainingController() {
         if (trainingController == null) {
             throw new IllegalStateException("trainingController not attached");
@@ -39,5 +44,16 @@ public final class AppContext {
 
     public void attachTrainingController(TrainingController controller) {
         this.trainingController = controller;
+    }
+
+    public Window window() {
+        if (window == null) {
+            throw new IllegalStateException("window not attached");
+        }
+        return window;
+    }
+
+    public void attachWindow(Window window) {
+        this.window = window;
     }
 }

@@ -11,6 +11,7 @@ import sibarum.mcc.graph.CompGraphNode;
 import sibarum.mcc.graph.ComputationGraph;
 import sibarum.mcc.graph.SlotSource;
 import sibarum.mcc.graph.substrate.TransformationEdge;
+import sibarum.ternion.designer.config.ConfigField;
 
 import java.util.ArrayList;
 import java.util.Collections;
@@ -82,6 +83,16 @@ public final class GraphSync {
         return portBindings.get(port);
     }
 
+    /** @return spec that owns {@code port}, or {@code null} if unknown. */
+    public NodeSpec specForPort(Component port) {
+        PortBinding b = portBindings.get(port);
+        if (b == null) return null;
+        for (NodeSpec spec : nodes.values()) {
+            if (spec.cgNode() == b.owner()) return spec;
+        }
+        return null;
+    }
+
     /** Insertion-ordered live nodes. */
     public List<NodeSpec> liveNodes() {
         List<NodeSpec> out = new ArrayList<>(nodeOrder.size());
@@ -114,22 +125,66 @@ public final class GraphSync {
     }
 
     /**
-     * Spawn a palette item onto the surface at the given em coordinates.
-     * Registers the dynamic child, position, and internal bindings.
+     * Spawn a palette item with the given config (or
+     * {@link ConfigField#defaultsOf} when the user accepted defaults).
      */
-    public NodeSpec spawn(PaletteItem item, float emX, float emY) {
+    public NodeSpec spawn(PaletteItem item, float emX, float emY, Map<String, Object> config) {
         String nodeId = item.key() + "#" + idCounter.incrementAndGet();
-        NodeSpec spec = item.spawn(nodeId);
+        return spawnWith(item, emX, emY, nodeId, config);
+    }
 
+    /** Convenience: spawn with the schema's defaults. */
+    public NodeSpec spawn(PaletteItem item, float emX, float emY) {
+        return spawn(item, emX, emY, ConfigField.defaultsOf(item.configSchema()));
+    }
+
+    /**
+     * Spawn with an explicit id — used by {@code ProjectIo.load} to
+     * preserve saved node ids so edges + parameter manifests line up
+     * across save/restore. Bumps the internal counter past any numeric
+     * suffix in the id so subsequent auto-spawns won't collide.
+     */
+    public NodeSpec spawn(PaletteItem item, float emX, float emY,
+                          Map<String, Object> config, String explicitId) {
+        int hash = explicitId.lastIndexOf('#');
+        if (hash >= 0) {
+            try {
+                long n = Long.parseLong(explicitId.substring(hash + 1));
+                while (idCounter.get() < n) idCounter.incrementAndGet();
+            } catch (NumberFormatException ignored) {}
+        }
+        return spawnWith(item, emX, emY, explicitId, config);
+    }
+
+    private NodeSpec spawnWith(PaletteItem item, float emX, float emY,
+                               String id, Map<String, Object> config) {
+        NodeSpec spec = item.spawn(id, config);
         GraphSurfacePositions.set(surface, spec.visual(), emX, emY);
         GraphSurfaceChildren.add(surface, spec.visual());
-
         nodes.put(spec.visual(), spec);
         nodeOrder.add(spec.visual());
         for (Map.Entry<Component, PortBinding> e : spec.portBindings().entrySet()) {
             portBindings.put(e.getKey(), e.getValue());
         }
         return spec;
+    }
+
+    /**
+     * Detach every spawned node from the surface and clear all
+     * GraphSync bookkeeping. Used by New / Open project flows to wipe
+     * the slate before populating with fresh state.
+     */
+    public void clearAll() {
+        List<Component> snapshot = new ArrayList<>(nodeOrder);
+        for (Component v : snapshot) {
+            Components.detach(v);
+        }
+        nodes.clear();
+        nodeOrder.clear();
+        portBindings.clear();
+        FrozenNodes.clearAll();
+        FrozenBadge.clearAll();
+        Invalidator.invalidate();
     }
 
     /**
@@ -152,6 +207,7 @@ public final class GraphSync {
         for (Component port : spec.portBindings().keySet()) {
             portBindings.remove(port);
         }
+        FrozenNodes.unmark(spec.cgNode());
         Invalidator.invalidate();
     }
 

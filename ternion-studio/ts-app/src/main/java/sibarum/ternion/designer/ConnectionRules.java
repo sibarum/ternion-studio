@@ -8,6 +8,7 @@ import sibarum.mcc.graph.SlotSource;
 import java.util.ArrayDeque;
 import java.util.Deque;
 import java.util.IdentityHashMap;
+import java.util.OptionalInt;
 import java.util.Set;
 
 /**
@@ -40,11 +41,29 @@ public final class ConnectionRules {
     }
 
     public void install() {
-        ConnectionRule.override((out, in) -> sameNodeOk(out, in) && noCycle(out, in));
+        ConnectionRule.override((out, in) ->
+            sameNodeOk(out, in) && noCycle(out, in) && frozenDimsCompatible(out, in));
     }
 
     private boolean sameNodeOk(Ports.Port out, Ports.Port in) {
         return out.node() != in.node();
+    }
+
+    /**
+     * Reject when both endpoints are frozen and have known, incompatible
+     * dims. Anything else is permitted — unfrozen mismatches will surface
+     * as a runtime training error with the offending node named, and the
+     * user can resolve via the Properties dialog or by deleting + re-adding.
+     */
+    private boolean frozenDimsCompatible(Ports.Port out, Ports.Port in) {
+        NodeSpec outSpec = sync.specForPort(out.component());
+        NodeSpec inSpec  = sync.specForPort(in.component());
+        if (outSpec == null || inSpec == null) return true;
+        if (!FrozenNodes.isFrozen(outSpec) || !FrozenNodes.isFrozen(inSpec)) return true;
+        OptionalInt outDim = PortDimResolver.dimOf(outSpec, out.component());
+        OptionalInt inDim  = PortDimResolver.dimOf(inSpec,  in.component());
+        if (outDim.isEmpty() || inDim.isEmpty()) return true;
+        return outDim.getAsInt() == inDim.getAsInt();
     }
 
     /**
