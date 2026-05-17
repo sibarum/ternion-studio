@@ -70,15 +70,23 @@ public final class MainShell {
     }
 
     /** Save/Open/New triggers reusable from app-level key handlers. */
-    public static void triggerNew(AppContext ctx)  { onNew(ctx); }
+    public static void triggerNew(AppContext ctx)  { confirmNew(ctx); }
     public static void triggerOpen(AppContext ctx) { onOpen(ctx); }
     public static void triggerSave(AppContext ctx) { onSave(ctx); }
+
+    private static void confirmNew(AppContext ctx) {
+        ConfirmDialog.show(
+            "New Project?",
+            "Discards the current graph and corpus. Save first if you want to keep your work.",
+            "Discard & Start New", Variant.ERROR,
+            () -> onNew(ctx));
+    }
 
     private static Component buildToolbar(AppContext ctx) {
         Component title = new Component.Text("Ternion Studio", Em.of(1.0f), LABEL_FG);
 
         Component newBtn  = Themed.button("New",  Em.of(5f), Variant.DEFAULT, 0,
-            () -> onNew(ctx));
+            () -> confirmNew(ctx));
         Component openBtn = Themed.button("Open", Em.of(5f), Variant.DEFAULT, 0,
             () -> onOpen(ctx));
         Component saveBtn = Themed.button("Save", Em.of(5f), Variant.PRIMARY, 0,

@@ -55,12 +55,18 @@ final class LossChartTest {
         // Append samples. The subscriber fires on the same thread,
         // throttled to ~60Hz; reset throttle before each append for
         // deterministic behavior in tests.
-        LossChart.resetThrottle();
+        // Each append now only sets a dirty flag — actual rebuild runs
+        // when the main thread calls refreshAll(). In production that's
+        // the EventLoop render closure; in tests we call it manually.
         controller.lossHistory().append(0.5);
         LossChart.resetThrottle();
+        LossChart.refreshAll();
         controller.lossHistory().append(0.3);
         LossChart.resetThrottle();
+        LossChart.refreshAll();
         controller.lossHistory().append(0.1);
+        LossChart.resetThrottle();
+        LossChart.refreshAll();
 
         // After 3 appends, expect 3 bars.
         assertEquals(3, DynamicChildren.added(chartArea).size(),

@@ -6,6 +6,7 @@ import sibarum.mcc.graph.ComputationGraph;
 import sibarum.mcc.graph.SlotSource;
 import sibarum.mcc.op.Terminal;
 import sibarum.mcc.primitive.Differentiable;
+import sibarum.mcc.primitive.Parameterized;
 import sibarum.mcc.primitive.Primitive;
 import sibarum.mcc.primitive.Trainable;
 import sibarum.mcc.training.Corpus;
@@ -79,6 +80,20 @@ public final class TrainingController {
     private volatile boolean stepPending = false;
     private Thread worker;
 
+    // ----- UI publish throttle -----
+    // The worker can grind through thousands of examples per second on
+    // tiny graphs. Firing Property.set on currentLoss/currentExample/
+    // currentEpoch every example fires their subscribers (TextStates
+    // updates, render invalidates) on the worker at that rate, which
+    // starves the renderer. Coalesce UI publishes to ~60Hz; training
+    // math is unaffected.
+    private static final long UI_PUBLISH_INTERVAL_NS = 16_000_000L;
+    private long lastUiPublishNs = 0L;
+    private long internalExample = 0L;
+    private long internalEpoch   = 0L;
+    private boolean uiPublishPending = false;
+    private double lastLoss = 0.0;
+
     // ----- training scratch state (worker-thread only) -----
     private final IdentityHashMap<Object, Trainable> pendingSteps = new IdentityHashMap<>();
     private Iterator<Example> currentIterator;
@@ -112,6 +127,12 @@ public final class TrainingController {
         try {
             if (state.get() == TrainingState.RUNNING) return;
             if (state.get() != TrainingState.IDLE && state.get() != TrainingState.STOPPED) return;
+            // Reset publish-throttle accumulators on each start so a new
+            // run begins with fresh counters/timestamps.
+            lastUiPublishNs = 0L;
+            internalExample = 0L;
+            internalEpoch   = 0L;
+            uiPublishPending = false;
 
             // Pre-flight: surface obvious misconfigurations before spinning
             // up the worker thread. Saves the user from staring at an
@@ -230,6 +251,10 @@ public final class TrainingController {
             try { w.join(2000); }
             catch (InterruptedException ie) { Thread.currentThread().interrupt(); }
         }
+        // Flush the final loss/example/epoch values so the post-stop UI
+        // reflects where training actually ended, not the last throttled
+        // publish from ~16ms before.
+        maybePublishUi(true);
     }
 
     // ---------- worker ----------
@@ -276,6 +301,7 @@ public final class TrainingController {
                 try {
                     runOneExample(ex);
                 } catch (RuntimeException e) {
+                    maybePublishUi(true);  // flush before reporting
                     String msg = failureMessage(e);
                     lastError.set(msg);
                     sibarum.dasum.gui.core.status.Status.error(
@@ -286,6 +312,7 @@ public final class TrainingController {
                 }
 
                 if (wasStep) {
+                    maybePublishUi(true);  // flush at step boundary
                     state.set(TrainingState.PAUSED);
                 }
             }
@@ -304,14 +331,16 @@ public final class TrainingController {
             if (currentIterator != null) {
                 // End of epoch — drain pending steps if accumulating.
                 if (!stepEveryExample.get()) applyPendingSteps();
-                currentEpoch.set(currentEpoch.get() + 1);
+                internalEpoch++;
+                uiPublishPending = true;
             }
             // Refresh the corpus snapshot — the user may have edited
             // rows since the last epoch.
             currentCorpus = ctx.corpus().toCorpus();
             if (currentCorpus.size() == 0) return null;
             currentIterator = currentCorpus.stream();
-            currentExample.set(0L);
+            internalExample = 0L;
+            uiPublishPending = true;
         }
         if (!currentIterator.hasNext()) return null;
         return currentIterator.next();
@@ -383,8 +412,32 @@ public final class TrainingController {
         }
 
         lossHistory.append(loss);
-        currentLoss.set(loss);
-        currentExample.set(currentExample.get() + 1);
+        lastLoss = loss;
+        internalExample++;
+        uiPublishPending = true;
+        maybePublishUi(false);
+    }
+
+    /**
+     * Coalesces UI-observable Property.set calls (currentLoss /
+     * currentExample / currentEpoch) to ~60Hz so the worker thread
+     * doesn't dominate Property subscribers — primarily
+     * {@link sibarum.dasum.gui.core.input.TextStates#setContent} — at
+     * thousands of Hz, which can starve the render thread.
+     *
+     * @param force when {@code true}, publishes immediately regardless
+     *              of the throttle. Used at state transitions to ensure
+     *              the post-stop frame reflects the last training step.
+     */
+    private void maybePublishUi(boolean force) {
+        if (!uiPublishPending && !force) return;
+        long now = System.nanoTime();
+        if (!force && now - lastUiPublishNs < UI_PUBLISH_INTERVAL_NS) return;
+        lastUiPublishNs = now;
+        uiPublishPending = false;
+        currentLoss.set(lastLoss);
+        currentExample.set(internalExample);
+        currentEpoch.set(internalEpoch);
     }
 
     /**
@@ -392,6 +445,11 @@ public final class TrainingController {
      * actually stepped, every node that participated in the most recent
      * successful example freezes — its structural config can no longer be
      * edited in place without first deleting the node.
+     *
+     * <p>After the step, post-step parameters are scanned for NaN/Inf.
+     * If a node's weights went non-finite, throws with the node id so
+     * training stops loudly instead of silently corrupting the next
+     * forward pass.
      */
     private void applyPendingSteps() {
         boolean stepped = !pendingSteps.isEmpty();
@@ -400,9 +458,26 @@ public final class TrainingController {
             t.step(lr);
         }
         pendingSteps.clear();
-        if (stepped) {
-            FrozenNodes.markAll(lastParticipants);
+        if (!stepped) return;
+        FrozenNodes.markAll(lastParticipants);
+        for (CompGraphNode n : lastParticipants) {
+            if (n.tNode().primitive() instanceof Parameterized p
+                && hasNonFiniteParameters(p)) {
+                throw new RuntimeException(
+                    "diverged: node '" + n.id() + "' has non-finite parameters after step"
+                        + " — lower the learning rate or click Reset Training");
+            }
         }
+    }
+
+    private static boolean hasNonFiniteParameters(Parameterized p) {
+        for (Parameterized.NamedTensor t : p.parameters()) {
+            double[] data = t.data();
+            for (int i = 0; i < data.length; i++) {
+                if (!Double.isFinite(data[i])) return true;
+            }
+        }
+        return false;
     }
 
     // ---------- helpers ----------
@@ -430,8 +505,13 @@ public final class TrainingController {
     // ----- MSE helpers (mirrors mcc-core/GraphTrainer's private methods) -----
 
     private static double halfMse(Value out, Value target) {
-        if (out instanceof MatrixValue mo && target instanceof MatrixValue mt
-                && mo.data().length == mt.data().length) {
+        if (out instanceof MatrixValue mo && target instanceof MatrixValue mt) {
+            if (mo.data().length != mt.data().length) {
+                throw new IllegalArgumentException(
+                    "MSE loss: network output is MATRIX[" + mo.data().length
+                        + "] but target is MATRIX[" + mt.data().length
+                        + "] — adjust the target cell length to match.");
+            }
             double s = 0.0;
             for (int i = 0; i < mo.data().length; i++) {
                 double d = mo.data()[i] - mt.data()[i];
@@ -444,21 +524,46 @@ public final class TrainingController {
             return 0.5 * d * d;
         }
         throw new IllegalArgumentException(
-            "MSE loss only supports MATRIX or NUMBER outputs; got out=" + out.type()
-                + " target=" + target.type());
+            "MSE loss: output type " + out.type()
+                + " does not match target type " + target.type()
+                + " — set the Terminal type to match the target column.");
     }
+
+    /**
+     * Gradient clip threshold for the MSE seed gradient — components of
+     * {@code (output − target)} are clamped to [-CLIP, +CLIP] before the
+     * backward pass begins. Saturates the gradient when the model
+     * overshoots (Huber-loss-like behavior) so a single bad step can't
+     * amplify into runaway weight growth. 1.0 is a conservative default
+     * that lets typical fits converge without divergence.
+     */
+    private static final double GRAD_CLIP = 1.0;
 
     private static Value mseGrad(Value out, Value target) {
         if (out instanceof MatrixValue mo && target instanceof MatrixValue mt) {
+            if (mo.data().length != mt.data().length) {
+                throw new IllegalArgumentException(
+                    "MSE gradient: network output is MATRIX[" + mo.data().length
+                        + "] but target is MATRIX[" + mt.data().length + "]");
+            }
             double[] g = new double[mo.data().length];
-            for (int i = 0; i < g.length; i++) g[i] = mo.data()[i] - mt.data()[i];
+            for (int i = 0; i < g.length; i++) {
+                g[i] = clip(mo.data()[i] - mt.data()[i]);
+            }
             return new MatrixValue(g);
         }
         if (out instanceof NumberValue no && target instanceof NumberValue nt) {
-            return new NumberValue(no.n() - nt.n());
+            return new NumberValue(clip(no.n() - nt.n()));
         }
         throw new IllegalArgumentException(
-            "MSE gradient only supports MATRIX or NUMBER outputs; got " + out.type());
+            "MSE gradient: output type " + out.type()
+                + " does not match target type " + target.type());
+    }
+
+    private static double clip(double v) {
+        if (v >  GRAD_CLIP) return  GRAD_CLIP;
+        if (v < -GRAD_CLIP) return -GRAD_CLIP;
+        return v;
     }
 
     private static void accumulate(Map<CompGraphNode, Value> grads, CompGraphNode key, Value addend) {

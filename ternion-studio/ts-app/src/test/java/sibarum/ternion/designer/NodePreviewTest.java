@@ -73,6 +73,12 @@ final class NodePreviewTest {
         Thread.sleep(200);
         controller.stop();
 
+        // Preview updates now happen on the main render thread via
+        // NodePreviewRefresher (so they don't race the renderer against
+        // TextStates's unsynchronized map). In production that runs from
+        // the event-loop closure; in tests we call it manually.
+        NodePreviewRefresher.refresh();
+
         // The state subscriber forces a refresh on STOPPED so by the
         // time stop() returns the preview must be populated. NumberValue
         // previews start with "num " per NodeRuntime.formatValue.

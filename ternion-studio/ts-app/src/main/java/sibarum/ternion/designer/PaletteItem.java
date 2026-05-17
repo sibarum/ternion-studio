@@ -20,6 +20,7 @@ import java.util.ArrayList;
 import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.OptionalInt;
 import java.util.function.Function;
 
 /**
@@ -114,6 +115,18 @@ public final class PaletteItem {
                 new PortBinding(cgNode, PortBinding.OUTPUT_SLOT, primitive.outputType()));
         }
 
+        // Inline dim summary, shown only for primitives whose shape is
+        // resolvable from config alone (Linear, HarmonicLift).
+        String dimHint = formatDimHint(key, resolved);
+        if (dimHint != null) {
+            Component dimText = new Component.Text(
+                dimHint, FontGroups.DEFAULT, Em.of(0.7f), DIM_HINT_FG,
+                null, null, Em.of(0.1f),
+                Em.of(16f), true,
+                false, false, false, false, 0);
+            DynamicChildren.add(visual, dimText);
+        }
+
         Component.Text previewText = new Component.Text(
             "", FontGroups.DEFAULT, Em.of(0.78f), PREVIEW_FG,
             null, null, Em.of(0.1f),
@@ -127,11 +140,21 @@ public final class PaletteItem {
         DynamicChildren.add(visual, previewRow);
 
         return new NodeSpec(key, Map.copyOf(resolved), visual, tNode, cgNode,
-            bindings, orderedInputs, outputComp, previewText);
+            bindings, orderedInputs, List.copyOf(inputLabels), outputComp, outputLabel, previewText);
     }
 
-    private static final Color PREVIEW_FG = new Color(0.78f, 0.84f, 0.92f, 0.9f);
-    private static final Color PREVIEW_BG = new Color(0f, 0f, 0f, 0.18f);
+    private static final Color PREVIEW_FG  = new Color(0.78f, 0.84f, 0.92f, 0.9f);
+    private static final Color PREVIEW_BG  = new Color(0f, 0f, 0f, 0.18f);
+    private static final Color DIM_HINT_FG = new Color(0.65f, 0.85f, 0.75f, 0.9f);
+
+    private static String formatDimHint(String paletteKey, Map<String, Object> cfg) {
+        OptionalInt in  = PortDimResolver.inputDimOf(paletteKey, cfg);
+        OptionalInt out = PortDimResolver.outputDimOf(paletteKey, cfg);
+        if (in.isEmpty() && out.isEmpty()) return null;
+        String inStr  = in.isPresent()  ? "MATRIX[" + in.getAsInt() + "]"  : "?";
+        String outStr = out.isPresent() ? "MATRIX[" + out.getAsInt() + "]" : "?";
+        return inStr + " → " + outStr;
+    }
 
     /** Convenience: no inputs, single output, no config. */
     public static PaletteItem source(String key, String label, Category cat, Color bg,

@@ -42,6 +42,9 @@ import sibarum.dasum.gui.core.window.Window;
 import sibarum.dasum.gui.natives.gl.Gl;
 import sibarum.dasum.gui.natives.glfw.Glfw;
 import sibarum.dasum.gui.natives.glfw.GlfwCallbacks;
+import sibarum.ternion.designer.FrozenBadge;
+import sibarum.ternion.designer.NodePreviewRefresher;
+import sibarum.ternion.train.LossChart;
 
 import java.util.IdentityHashMap;
 import java.util.Map;
@@ -82,7 +85,16 @@ public final class TsApp {
                 RenderStats stats = new RenderStats();
                 System.out.println("Ternion Studio — Designer / Data / Train. Ctrl+Space for commands; Ctrl+=/- zoom.");
 
+                FreezeDetector.start();
                 EventLoop loop = new EventLoop(window, () -> {
+                    FreezeDetector.beat();
+                    // Main-thread sidecar refresh — DynamicChildren mutations
+                    // must not race the training worker's mutations to the
+                    // same IdentityHashMap.
+                    FrozenBadge.refresh(ctx.graphSync());
+                    LossChart.refreshAll();
+                    NodePreviewRefresher.refresh();
+
                     int fbW = window.framebufferWidth();
                     int fbH = window.framebufferHeight();
                     float[] projection = Projection.orthoTopLeft(fbW, fbH);
@@ -284,7 +296,16 @@ public final class TsApp {
                     SliderController.onMouseDown(hit, InputState.mouseX(), InputState.mouseY());
                     return;
                 }
-                Component hovered = HoverState.hovered();
+                // Fresh hit-test on press — HoverState is only refreshed on
+                // cursor-move events, so it's stale when the UI shifts under a
+                // stationary cursor (e.g. a row deletes and another row slides
+                // into the cursor's position).
+                LayoutResult lrPress = LatestLayout.result();
+                Component pressRoot = OverlayStack.activeInputRoot(LatestLayout.root());
+                Component hovered = (lrPress != null && pressRoot != null)
+                    ? HitTest.test(pressRoot, lrPress, (float) InputState.mouseX(), (float) InputState.mouseY())
+                    : null;
+                HoverState.update(hovered);
                 pressTarget = hovered;
                 if (hovered != null) FocusState.set(hovered);
                 else                 FocusState.clear();

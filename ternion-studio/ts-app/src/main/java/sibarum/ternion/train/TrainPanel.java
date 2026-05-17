@@ -13,7 +13,9 @@ import sibarum.dasum.gui.core.theme.Palette;
 import sibarum.dasum.gui.core.theme.Theme;
 import sibarum.dasum.gui.core.theme.Themed;
 import sibarum.dasum.gui.core.theme.Variant;
+import sibarum.dasum.gui.core.status.Status;
 import sibarum.ternion.app.AppContext;
+import sibarum.ternion.designer.GraphSync;
 
 import java.util.List;
 
@@ -36,11 +38,12 @@ public final class TrainPanel {
     private static final Color SL_THUMB = new Color(0.90f, 0.92f, 0.97f, 1f);
     private static final Color CB_BOX   = new Color(0.18f, 0.20f, 0.25f, 1f);
     private static final Color CB_CHECK = new Color(0.30f, 0.80f, 0.50f, 1f);
+    private static final Color INPUT_BG = new Color(0.13f, 0.16f, 0.21f, 1f);
 
     public static Component build(AppContext ctx) {
         TrainingController controller = ctx.trainingController();
 
-        Component controls = buildControls(controller);
+        Component controls = buildControls(ctx);
         Component params   = buildParameters(controller);
         Component status   = buildStatus(controller);
         Component chart    = LossChart.build(controller);
@@ -53,7 +56,8 @@ public final class TrainPanel {
         );
     }
 
-    private static Component buildControls(TrainingController controller) {
+    private static Component buildControls(AppContext ctx) {
+        TrainingController controller = ctx.trainingController();
         // Toggle button label adapts to state. We can't rebuild a Text's
         // content via the record (it's immutable), so we use TextStates'
         // content-override mechanism — same one the editable Text widgets
@@ -72,10 +76,12 @@ public final class TrainPanel {
             List.of(toggleLabel), true, 0);
         Handlers.onClick(toggle, () -> onToggle(controller));
 
-        Component step = Themed.button("Step",  Em.of(5.5f), Variant.INFO,    0);
-        Component stop = Themed.button("Stop",  Em.of(5.5f), Variant.ERROR,   0);
-        Handlers.onClick(step, controller::step);
-        Handlers.onClick(stop, controller::stop);
+        Component step  = Themed.button("Step",   Em.of(5.5f), Variant.INFO,    0);
+        Component stop  = Themed.button("Stop",   Em.of(5.5f), Variant.ERROR,   0);
+        Component reset = Themed.button("Reset",  Em.of(5.5f), Variant.WARNING, 0);
+        Handlers.onClick(step,  controller::step);
+        Handlers.onClick(stop,  controller::stop);
+        Handlers.onClick(reset, () -> onReset(ctx));
 
         // Update toggle label on state changes.
         controller.state().subscribe(s -> TextStates.setContent(toggleLabel, toggleLabelFor(s)));
@@ -83,9 +89,28 @@ public final class TrainPanel {
         return new Component.Flex(
             null, Em.of(2.6f), Em.of(0.5f), TOOLBAR_BG,
             Direction.ROW, JustifyContent.START, AlignItems.CENTER, Em.of(0.6f),
-            List.of(toggle, step, stop),
+            List.of(toggle, step, stop, reset),
             false, 0
         );
+    }
+
+    /**
+     * Stop training, reinitialize every Trainable's weights, unfreeze every
+     * node, and clear the loss history. Corpus rows and graph topology are
+     * preserved. Use when training has diverged (NaN weights) and you want
+     * to start over without rebuilding the graph by hand.
+     */
+    private static void onReset(AppContext ctx) {
+        TrainingController controller = ctx.trainingController();
+        controller.stop();
+        GraphSync.ResetSummary summary = ctx.graphSync().resetTraining(System.nanoTime());
+        controller.lossHistory().reset();
+        controller.lastError().set("");
+        String msg = "Reset training: reinitialized " + summary.reinitialized() + " trainable(s)";
+        if (!summary.skipped().isEmpty()) {
+            msg += "; skipped (no reinit support): " + String.join(", ", summary.skipped());
+        }
+        Status.success(msg);
     }
 
     private static void onToggle(TrainingController controller) {
@@ -114,13 +139,39 @@ public final class TrainPanel {
             SL_TRACK, SL_FILL, SL_THUMB,
             lr, 0.001f, 1.0f);
 
-        // Live readout next to the slider — same TextStates trick.
-        Component.Text lrValueText = new Component.Text(
+        // Editable text input mirroring the slider value. Type a precise
+        // LR and press Apply (or move the slider for rough adjustment).
+        Component.Text lrEdit = new Component.Text(
             formatLr(lr.get()), sibarum.dasum.gui.core.text.FontGroups.DEFAULT,
             Em.of(0.9f), LABEL_FG,
-            null, null, Em.ZERO, null, false,
-            false, false, false, false, 0);
-        lr.subscribe(v -> TextStates.setContent(lrValueText, formatLr(v)));
+            Em.of(4.5f), null, Em.of(0.2f),
+            Em.of(4.5f), true,
+            true, true, true, false, 0);
+        Component lrInputFrame = new Component.Flex(
+            Em.of(4.5f), Em.of(1.7f), Em.ZERO, INPUT_BG,
+            Direction.ROW, JustifyContent.START, AlignItems.STRETCH, Em.ZERO,
+            List.of(lrEdit), false, 0);
+
+        // Slider drag → updates lr → mirrors back into the text input.
+        // This may stomp on a half-typed value if the user is editing while
+        // dragging, but the user wouldn't typically be doing both at once.
+        lr.subscribe(v -> TextStates.setContent(lrEdit, formatLr(v)));
+
+        Component applyLr = Themed.button("Apply", Em.of(4.5f), Variant.PRIMARY, 0, () -> {
+            String s = TextStates.contentOf(lrEdit).trim();
+            try {
+                float v = Float.parseFloat(s);
+                if (v <= 0f || v > 10f) {
+                    sibarum.dasum.gui.core.status.Status.warn(
+                        "LR must be in (0, 10]; got " + s);
+                    return;
+                }
+                lr.set(v);
+            } catch (NumberFormatException ex) {
+                sibarum.dasum.gui.core.status.Status.warn(
+                    "LR not a number: '" + s + "'");
+            }
+        });
 
         Component stepEvery = new Component.Checkbox(Em.of(1.0f),
             CB_BOX, CB_CHECK, controller.stepEveryExample());
@@ -130,7 +181,7 @@ public final class TrainPanel {
         return new Component.Flex(
             null, Em.of(2.2f), Em.of(0.5f), SURFACE_BG,
             Direction.ROW, JustifyContent.START, AlignItems.CENTER, Em.of(0.7f),
-            List.of(lrLabel, lrSlider, lrValueText, stepEvery, stepEveryLabel),
+            List.of(lrLabel, lrSlider, lrInputFrame, applyLr, stepEvery, stepEveryLabel),
             false, 0
         );
     }

@@ -36,14 +36,28 @@ public final class PortDimResolver {
         boolean isInput = spec.orderedInputPorts().contains(port);
         boolean isOutput = port == spec.outputPort();
         if (!isInput && !isOutput) return OptionalInt.empty();
+        return isInput ? inputDimOf(spec.paletteKey(), cfg)
+                       : outputDimOf(spec.paletteKey(), cfg);
+    }
 
-        return switch (spec.paletteKey()) {
-            case "linear.linear" -> isInput
-                ? intFrom(cfg, "inDim")
-                : intFrom(cfg, "outDim");
+    /** Input dim derivable from {@code (paletteKey, config)} alone — used
+     *  at spawn time before a {@link NodeSpec} exists. */
+    public static OptionalInt inputDimOf(String paletteKey, Map<String, Object> cfg) {
+        if (paletteKey == null || cfg == null) return OptionalInt.empty();
+        return switch (paletteKey) {
+            case "linear.linear"         -> intFrom(cfg, "inDim");
+            case "linear.harmonic_lift"  -> intFrom(cfg, "inputDim");
+            default                      -> OptionalInt.empty();
+        };
+    }
+
+    /** Output dim derivable from {@code (paletteKey, config)} alone. */
+    public static OptionalInt outputDimOf(String paletteKey, Map<String, Object> cfg) {
+        if (paletteKey == null || cfg == null) return OptionalInt.empty();
+        return switch (paletteKey) {
+            case "linear.linear" -> intFrom(cfg, "outDim");
             case "linear.harmonic_lift" -> {
                 OptionalInt in = intFrom(cfg, "inputDim");
-                if (isInput) yield in;
                 OptionalInt k = intFrom(cfg, "K");
                 yield (in.isPresent() && k.isPresent())
                     ? OptionalInt.of(2 * k.getAsInt() * in.getAsInt())

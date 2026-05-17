@@ -12,6 +12,8 @@ import sibarum.dasum.gui.core.render.Color;
 import sibarum.dasum.gui.core.text.FontGroups;
 
 import java.util.List;
+import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
  * Live loss chart bound to a {@link LossHistory}. Visual: a row of
@@ -49,10 +51,12 @@ public final class LossChart {
 
     private static final long MIN_REBUILD_INTERVAL_NS = 16_000_000L; // ~60Hz
 
-    /** Per-chart throttle state. Tracked separately for each chart since
-     *  in principle multiple charts could coexist. Stored on the
-     *  controller-history pair via the LossHistory identity. */
-    private static final java.util.IdentityHashMap<LossHistory, long[]> LAST_REBUILD = new java.util.IdentityHashMap<>();
+    /** Per-chart state, including a dirty flag set by worker-thread
+     *  subscribers and consumed by the main render thread via
+     *  {@link #refreshAll()}. DynamicChildren mutations are NOT safe to
+     *  perform from the training worker because the main thread reads
+     *  the same IdentityHashMap during layout. */
+    private static final CopyOnWriteArrayList<ChartState> ALL = new CopyOnWriteArrayList<>();
 
     private LossChart() {}
 
@@ -72,16 +76,18 @@ public final class LossChart {
             Direction.ROW, JustifyContent.START, AlignItems.END, Em.ZERO,
             List.of(), false, 0);
 
-        // Initial render — covers the case where history already has data
-        // (e.g. chart rebuilt after panel switch).
-        rebuild(history, chartArea, header, /*force*/ true);
+        ChartState state = new ChartState(history, chartArea, header);
+        ALL.add(state);
 
-        history.version().subscribe(v ->
-            rebuild(history, chartArea, header, /*force*/ false));
-        // Force-refresh on training-state transitions so post-stop frame
-        // reflects the final loss state (no missed last-bump from throttle).
-        controller.state().subscribe(s ->
-            rebuild(history, chartArea, header, /*force*/ true));
+        // Subscribers run on the calling thread (often the worker). They
+        // only set a flag — actual DynamicChildren mutation happens on the
+        // main render thread via refreshAll().
+        history.version().subscribe(v -> state.dirty.set(true));
+        controller.state().subscribe(s -> state.dirty.set(true));
+
+        // Initial render runs synchronously here on whatever thread called
+        // build() — typically the main thread during panel construction.
+        state.refresh(true);
 
         return new Component.Flex(
             null, null, Em.of(0.3f), TRANSPARENT,
@@ -90,13 +96,41 @@ public final class LossChart {
             false, 1);
     }
 
+    /** Called once per frame from the main render thread. Rebuilds any
+     *  charts whose dirty flag was set since the last call, with a 60Hz
+     *  throttle to keep large histories responsive. */
+    public static void refreshAll() {
+        long now = System.nanoTime();
+        for (ChartState state : ALL) {
+            if (!state.dirty.get()) continue;
+            if (now - state.lastRebuildNs < MIN_REBUILD_INTERVAL_NS) continue;
+            state.dirty.set(false);
+            state.lastRebuildNs = now;
+            state.refresh(false);
+        }
+    }
+
+    private static final class ChartState {
+        final LossHistory history;
+        final Component.Flex chartArea;
+        final Component.Text header;
+        final AtomicBoolean dirty = new AtomicBoolean(true);
+        long lastRebuildNs = 0L;
+
+        ChartState(LossHistory history, Component.Flex chartArea, Component.Text header) {
+            this.history = history;
+            this.chartArea = chartArea;
+            this.header = header;
+        }
+
+        void refresh(boolean force) {
+            rebuild(history, chartArea, header, force);
+        }
+    }
+
     private static void rebuild(LossHistory history, Component.Flex chartArea,
                                 Component.Text header, boolean force) {
-        long now = System.nanoTime();
-        long[] last = LAST_REBUILD.computeIfAbsent(history, k -> new long[1]);
-        if (!force && now - last[0] < MIN_REBUILD_INTERVAL_NS) return;
-        last[0] = now;
-
+        // Throttle handled in refreshAll(); force=true skips the throttle.
         List<LossHistory.Sample> samples = history.snapshot();
 
         if (samples.isEmpty()) {
@@ -135,9 +169,11 @@ public final class LossChart {
         return Math.min(BAR_WIDTH_EM_MAX, Math.max(BAR_WIDTH_EM_MIN, fair));
     }
 
-    /** Test/dev helper — drop cached throttle state. Not called by
-     *  production code. */
+    /** Test/dev helper — zero the per-chart throttle timestamps so the
+     *  next {@link #refreshAll} call rebuilds unconditionally. Does NOT
+     *  drop the chart-state list; tests that want a clean slate should
+     *  build a fresh {@link TrainingController}. */
     static void resetThrottle() {
-        LAST_REBUILD.clear();
+        for (ChartState state : ALL) state.lastRebuildNs = 0L;
     }
 }

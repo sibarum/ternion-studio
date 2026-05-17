@@ -9,7 +9,6 @@ import sibarum.dasum.gui.core.event.Invalidator;
 import sibarum.dasum.gui.core.input.ContextMenuItem;
 import sibarum.dasum.gui.core.input.Handlers;
 import sibarum.dasum.gui.core.input.PortContextMenu;
-import sibarum.dasum.gui.core.input.TextStates;
 import sibarum.dasum.gui.core.render.Color;
 import sibarum.dasum.gui.core.status.Status;
 import sibarum.dasum.gui.core.theme.Themed;
@@ -94,52 +93,13 @@ public final class DesignerPanel {
      */
     private static void wireNodeRuntimeUpdates(AppContext ctx) {
         NodeRuntime runtime = ctx.trainingController().nodeRuntime();
-        long[] lastNs = { 0L };
-        long minIntervalNs = 16_000_000L;
-        Runnable refresh = () -> {
-            updateNodePreviews(ctx.graphSync(), runtime);
-            FrozenBadge.refresh(ctx.graphSync());
-        };
-
-        runtime.version().subscribe(v -> {
-            long now = System.nanoTime();
-            if (now - lastNs[0] < minIntervalNs) return;
-            lastNs[0] = now;
-            refresh.run();
-        });
-        ctx.trainingController().state().subscribe(s -> {
-            // Force-refresh on training state transitions (start/stop)
-            // so the user always sees the final post-step values, not a
-            // throttle-skipped intermediate snapshot.
-            lastNs[0] = 0L;
-            refresh.run();
-        });
-    }
-
-    private static void updateNodePreviews(GraphSync sync, NodeRuntime runtime) {
-        for (NodeSpec spec : sync.liveNodes()) {
-            NodeRuntime.Snapshot snap = runtime.of(spec.cgNode());
-            String text = formatPreview(snap);
-            TextStates.setContent(spec.previewText(), text);
-        }
-    }
-
-    private static String formatPreview(NodeRuntime.Snapshot snap) {
-        if (snap == null) return "";
-        if ((snap.preview() == null || snap.preview().isEmpty()) && snap.gradMagnitude() == 0.0) {
-            return "";
-        }
-        if (snap.gradMagnitude() == 0.0) {
-            return snap.preview();
-        }
-        return snap.preview() + "  ∇ " + formatGrad(snap.gradMagnitude());
-    }
-
-    private static String formatGrad(double mag) {
-        if (mag == 0.0)            return "0";
-        if (mag < 1e-4)            return String.format("%.2e", mag);
-        if (mag < 10.0)            return String.format("%.4f", mag);
-        return String.format("%.2f", mag);
+        // All preview updates run on the main render thread via
+        // NodePreviewRefresher to avoid racing the training worker against
+        // the renderer's TextStates reads. The subscribers here only mark
+        // the refresher dirty.
+        NodePreviewRefresher.install(ctx.graphSync(), runtime);
+        runtime.version().subscribe(v -> NodePreviewRefresher.markDirty());
+        ctx.trainingController().state().subscribe(s -> NodePreviewRefresher.forceRefresh());
     }
 
     /**
@@ -196,7 +156,7 @@ public final class DesignerPanel {
             PaletteItem palette = Palette.byKey(spec.paletteKey());
             if (palette != null && !palette.configSchema().isEmpty()) {
                 items.add(new ContextMenuItem("Properties…",
-                    () -> showProperties(spec, palette)));
+                    () -> showProperties(sync, spec, palette)));
             }
             items.add(new ContextMenuItem("Delete Node",
                 () -> sync.removeNode(spec.visual())));
@@ -204,15 +164,34 @@ public final class DesignerPanel {
         });
     }
 
-    private static void showProperties(NodeSpec spec, PaletteItem palette) {
-        String reason = FrozenNodes.isFrozen(spec)
-            ? "Frozen by training — delete and re-create to change."
-            : "Read-only — delete and re-create to change. (Editable Properties is a follow-up.)";
-        ConfigDialog.showReadOnly(
+    private static void showProperties(GraphSync sync, NodeSpec spec, PaletteItem palette) {
+        if (FrozenNodes.isFrozen(spec)) {
+            ConfigDialog.showReadOnly(
+                "Properties: " + palette.label(),
+                palette.configSchema(),
+                spec.config(),
+                "Frozen by training — delete and re-create to change.");
+            return;
+        }
+        ConfigDialog.show(
             "Properties: " + palette.label(),
             palette.configSchema(),
             spec.config(),
-            reason);
+            newConfig -> {
+                GraphSync.ReplaceResult result = sync.replaceConfig(spec, newConfig);
+                wireNodeContextMenu(sync, result.newSpec());
+                sibarum.dasum.gui.core.input.PortContextMenu.registerDefaults(result.newSpec().visual());
+                String msg = "Updated " + palette.label() + " (id " + result.newSpec().cgNode().id() + ")";
+                if (result.connectionsPreserved() > 0) {
+                    msg += " — " + result.connectionsPreserved() + " connection(s) preserved";
+                }
+                if (!result.connectionsDropped().isEmpty()) {
+                    msg += "; dropped: " + String.join(", ", result.connectionsDropped());
+                    sibarum.dasum.gui.core.status.Status.warn(msg);
+                } else {
+                    sibarum.dasum.gui.core.status.Status.success(msg);
+                }
+            });
     }
 
     /**

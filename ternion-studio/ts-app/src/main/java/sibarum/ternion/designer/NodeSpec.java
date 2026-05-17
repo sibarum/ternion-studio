@@ -30,6 +30,18 @@ public record NodeSpec(
     CompGraphNode cgNode,
     Map<Component, PortBinding> portBindings,
     List<Component> orderedInputPorts,   // index = slot index
+    List<String> inputLabels,            // parallel to orderedInputPorts
     Component outputPort,                // null if the primitive has no observable output port
+    String outputLabel,                  // null when outputPort is null
     Component.Text previewText           // stable, in-place updatable via TextStates
-) {}
+) {
+    /** Look up a port's declared label, or {@code null} if {@code port} isn't on this spec. */
+    public String portNameOf(Component port) {
+        if (port == null) return null;
+        for (int i = 0; i < orderedInputPorts.size(); i++) {
+            if (orderedInputPorts.get(i) == port) return inputLabels.get(i);
+        }
+        if (port == outputPort) return outputLabel;
+        return null;
+    }
+}
