@@ -12,7 +12,6 @@ import sibarum.mcc.value.Value;
 
 import java.util.List;
 
-import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
@@ -37,53 +36,59 @@ final class GraphSyncIntegrationTest {
         GraphSync sync = new GraphSync(surface);
         sync.install();
 
-        // Spawn Parameter (MATRIX-4) and Terminal (MATRIX).
-        PaletteItem paramItem    = Palette.byKey("input.parameter.matrix4");
-        PaletteItem terminalItem = Palette.byKey("output.terminal.matrix");
-        assertNotNull(paramItem,    "param palette item present");
-        assertNotNull(terminalItem, "terminal palette item present");
+        // Spawn Parameter (MATRIX-4) → ReLU as the downstream sink for
+        // the test. (ReLU is a 1-input MATRIX primitive; using it
+        // avoids needing a Terminal entry in the palette, which Phase
+        // C-2 removed.)
+        PaletteItem paramItem = Palette.byKey("input.parameter.matrix4");
+        PaletteItem sinkItem  = Palette.byKey("act.relu");
+        assertNotNull(paramItem, "param palette item present");
+        assertNotNull(sinkItem,  "sink palette item present");
 
-        NodeSpec paramSpec    = sync.spawn(paramItem,    2f, 2f);
-        NodeSpec terminalSpec = sync.spawn(terminalItem, 8f, 2f);
+        NodeSpec paramSpec = sync.spawn(paramItem, 2f, 2f);
+        NodeSpec sinkSpec  = sync.spawn(sinkItem,  8f, 2f);
         assertEquals(2, sync.liveNodes().size(), "two nodes after spawn");
         assertTrue(GraphSurfaceChildren.added(surface).contains(paramSpec.visual()),
             "paramNode added to GraphSurfaceChildren");
 
-        // Programmatic wire: paramOutput → terminalInput.
+        // Programmatic wire: paramOutput → sinkInput.
         Component paramOut = paramSpec.outputPort();
-        Component termIn   = terminalSpec.orderedInputPorts().get(0);
-        Connection conn = Connections.add(surface, paramOut, termIn);
+        Component sinkIn   = sinkSpec.orderedInputPorts().get(0);
+        Connection conn = Connections.add(surface, paramOut, sinkIn);
         assertNotNull(conn, "Connection created");
         // The listener should have wired the slot.
-        assertNotNull(terminalSpec.cgNode().slot(0),
-            "Terminal slot 0 wired post-connect");
-        assertEquals(paramSpec.cgNode(), terminalSpec.cgNode().slot(0).source(),
-            "Terminal slot 0 sources Parameter");
+        assertNotNull(sinkSpec.cgNode().slot(0),
+            "Sink slot 0 wired post-connect");
+        assertEquals(paramSpec.cgNode(), sinkSpec.cgNode().slot(0).source(),
+            "Sink slot 0 sources Parameter");
 
-        // Execute the graph — Parameter outputs its random init.
-        ComputationGraph graph = sync.snapshot(terminalSpec.cgNode());
+        // Execute the graph — Parameter outputs its random init, ReLU
+        // clamps to max(0, x) element-wise. We just verify that
+        // execute() succeeds and returns a MATRIX of matching arity.
+        ComputationGraph graph = sync.snapshot(sinkSpec.cgNode());
         Value out = graph.execute();
         MatrixValue m = assertInstanceOf(MatrixValue.class, out);
-        // Parameter's initial data is independent of slot wiring; just check
-        // that the Terminal forwards it verbatim. (Read it from the Parameter
-        // primitive directly via apply with no inputs.)
         Value paramVal = paramSpec.tNode().primitive().apply(List.of());
-        MatrixValue expected = assertInstanceOf(MatrixValue.class, paramVal);
-        assertArrayEquals(expected.data(), m.data(), 1e-12,
-            "Terminal output equals Parameter output");
+        MatrixValue paramMat = assertInstanceOf(MatrixValue.class, paramVal);
+        assertEquals(paramMat.data().length, m.data().length,
+            "Sink output arity matches Parameter output arity");
+        for (int i = 0; i < m.data().length; i++) {
+            assertEquals(Math.max(0.0, paramMat.data()[i]), m.data()[i], 1e-12,
+                "ReLU sink output[" + i + "] = max(0, param[" + i + "])");
+        }
 
         // Remove the Parameter: cascade-fires REMOVED, which should clear
-        // Terminal's slot binding.
+        // Sink's slot binding.
         sync.removeNode(paramSpec.visual());
-        assertNull(terminalSpec.cgNode().slot(0),
-            "Terminal slot 0 cleared after upstream Parameter detached");
+        assertNull(sinkSpec.cgNode().slot(0),
+            "Sink slot 0 cleared after upstream Parameter detached");
         assertEquals(1, sync.liveNodes().size(), "one node after delete");
         assertFalse(GraphSurfaceChildren.added(surface).contains(paramSpec.visual()),
             "paramNode removed from GraphSurfaceChildren");
-        // Trying to execute now should fail cleanly (Terminal slot has no source AND no root binding).
+        // Trying to execute now should fail cleanly (Sink slot has no source AND no root binding).
         try {
-            sync.snapshot(terminalSpec.cgNode()).execute();
-            fail("execute should fail with no source on Terminal");
+            sync.snapshot(sinkSpec.cgNode()).execute();
+            fail("execute should fail with no source on Sink");
         } catch (IllegalStateException ignored) {
             // expected
         }

@@ -12,7 +12,6 @@ import sibarum.dasum.gui.core.status.Status;
 import sibarum.dasum.gui.core.theme.Themed;
 import sibarum.dasum.gui.core.theme.Variant;
 
-import sibarum.ternion.data.CorpusModel;
 import sibarum.ternion.data.DataPanel;
 import sibarum.ternion.designer.DesignerPanel;
 import sibarum.ternion.designer.GraphSync;
@@ -43,22 +42,25 @@ public final class MainShell {
         // GraphSurfaceChildren, ContextMenuStates) registered on the
         // original. This silently broke the Designer's right-click + spawn
         // pipeline before the fix.
-        // Hint declared as the GraphSurface's first child — sits underneath
-        // any dynamically-spawned nodes in render order, so it stays as a
-        // gentle backdrop in the empty area and gets visually covered as
-        // the user fills the surface.
-        Component designerHint = new Component.Text(
-            "Right-click to add a node — or press Ctrl+Space for commands",
-            Em.of(0.95f), new Color(0.50f, 0.55f, 0.62f, 0.65f));
+        // Earlier we declared a "Right-click to add a node…" Text as a
+        // surface child to act as a gentle backdrop. Dasum's batcher does
+        // a two-pass flush per frame (all solid fills, then all MSDF text)
+        // which means surface-child glyphs paint over later-drawn node
+        // backgrounds — the hint visibly clipped through spawned nodes.
+        // The same guidance lives in the Designer panel's toolbar above
+        // the surface, so the in-surface hint is dropped.
         Component.GraphSurface designerSurface = new Component.GraphSurface(
-            null, null, DESIGNER_BG, List.of(designerHint), true, 1);
-        sibarum.dasum.gui.core.graph.GraphSurfacePositions.set(
-            designerSurface, designerHint, 2f, 2f);
+            null, null, DESIGNER_BG, List.of(), true, 1);
         GraphSync graphSync = new GraphSync(designerSurface);
         graphSync.install();
-        CorpusModel corpus = new CorpusModel();
-        AppContext ctx = new AppContext(designerSurface, graphSync, corpus);
+        AppContext ctx = new AppContext(designerSurface, graphSync);
         ctx.attachTrainingController(new TrainingController(ctx));
+        // Wire dirty-tracking listeners AFTER the registry has been
+        // seeded (AppContext constructor does seedBundled) and AFTER
+        // any other startup mutations, so the freshly-built project
+        // starts clean.
+        sibarum.ternion.project.ProjectDirtyHook.install(ctx);
+        ctx.project().markClean();
 
         Component root = new Component.Flex(
             null, null, Em.of(0.5f), FRAME_BG,
@@ -73,6 +75,44 @@ public final class MainShell {
     public static void triggerNew(AppContext ctx)  { confirmNew(ctx); }
     public static void triggerOpen(AppContext ctx) { onOpen(ctx); }
     public static void triggerSave(AppContext ctx) { onSave(ctx); }
+
+    /**
+     * Try to close the window. If the project is clean, closes
+     * immediately. If dirty, opens the Unsaved-Changes dialog and
+     * defers the decision to the user:
+     * <ul>
+     *   <li>Save → run {@link #onSave} then close (the close fires
+     *       only if save resolves to a real path; a cancelled
+     *       save-dialog leaves the window open and the prompt
+     *       dismissed).</li>
+     *   <li>Discard → close immediately, dropping unsaved edits.</li>
+     *   <li>Cancel → just dismiss the dialog.</li>
+     * </ul>
+     */
+    public static void requestClose(AppContext ctx) {
+        if (!ctx.project().dirty().get()) {
+            forceClose(ctx);
+            return;
+        }
+        UnsavedChangesDialog.show(
+            () -> {
+                onSave(ctx);
+                // onSave is fire-and-forget on the GLFW thread; the
+                // file dialog blocks until completion, after which
+                // markClean has either fired (success) or not
+                // (cancel / error). Honor the clean flag.
+                if (!ctx.project().dirty().get()) forceClose(ctx);
+            },
+            () -> forceClose(ctx));
+    }
+
+    /** Unconditional close — no dirty check. Used after the user
+     *  confirms via the Unsaved-Changes dialog or chose Discard. */
+    public static void forceClose(AppContext ctx) {
+        sibarum.dasum.gui.natives.glfw.Glfw.glfwSetWindowShouldClose(
+            ctx.window().handle(), true);
+        sibarum.dasum.gui.core.event.Invalidator.invalidate();
+    }
 
     private static void confirmNew(AppContext ctx) {
         ConfirmDialog.show(
@@ -109,7 +149,14 @@ public final class MainShell {
     private static void onNew(AppContext ctx) {
         ctx.trainingController().stop();
         ctx.graphSync().clearAll();
-        ctx.corpus().clearAll();
+        // Drop every non-bundled source so a fresh project doesn't
+        // inherit the previous session's editable / imported tables.
+        for (sibarum.ternion.data.source.DataSource ds :
+                new java.util.ArrayList<>(ctx.dataSources().all())) {
+            if (ds.origin() != sibarum.ternion.data.source.Origin.BUNDLED) {
+                ctx.dataSources().removeForced(ds.id());
+            }
+        }
         ctx.project().reset();
         Status.info("New project — ready");
     }

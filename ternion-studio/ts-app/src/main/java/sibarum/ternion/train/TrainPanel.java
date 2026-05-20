@@ -9,12 +9,11 @@ import sibarum.dasum.gui.core.input.Handlers;
 import sibarum.dasum.gui.core.input.TextStates;
 import sibarum.dasum.gui.core.reactive.Property;
 import sibarum.dasum.gui.core.render.Color;
-import sibarum.dasum.gui.core.theme.Palette;
-import sibarum.dasum.gui.core.theme.Theme;
-import sibarum.dasum.gui.core.theme.Themed;
 import sibarum.dasum.gui.core.theme.Variant;
 import sibarum.dasum.gui.core.status.Status;
 import sibarum.ternion.app.AppContext;
+import sibarum.ternion.app.Toolbars;
+import sibarum.ternion.app.generated.Icons;
 import sibarum.ternion.designer.GraphSync;
 
 import java.util.List;
@@ -40,13 +39,38 @@ public final class TrainPanel {
     private static final Color CB_CHECK = new Color(0.30f, 0.80f, 0.50f, 1f);
     private static final Color INPUT_BG = new Color(0.13f, 0.16f, 0.21f, 1f);
 
+    /** Mutable bag the per-section builders fill in so {@link #build}
+     *  can wire {@link TrainStatusRefresher} with every Text ref at once. */
+    private static final class Refs {
+        Component.Text toggleLabel;
+        Component.Text lrEdit;
+        Component.Text state, epoch, example, loss, error;
+    }
+
     public static Component build(AppContext ctx) {
         TrainingController controller = ctx.trainingController();
+        Refs refs = new Refs();
 
-        Component controls = buildControls(ctx);
-        Component params   = buildParameters(controller);
-        Component status   = buildStatus(controller);
+        Component controls = buildControls(ctx, refs);
+        Component params   = buildParameters(controller, refs);
+        Component status   = buildStatus(controller, refs);
         Component chart    = LossChart.build(controller);
+
+        // Marshal every worker-fired Property update through one main-thread
+        // refresh tick (called from TsApp's render closure). Avoids the
+        // unsynchronized TextStates IdentityHashMap being mutated from the
+        // training worker, which was causing transient renderer probe-sequence
+        // failures (connectors disappearing, nodes phasing) once the
+        // visualizer's per-step activity widened the race window.
+        TrainStatusRefresher.install(new TrainStatusRefresher.Binding(
+            controller,
+            refs.state, refs.epoch, refs.example, refs.loss, refs.error,
+            refs.lrEdit, refs.toggleLabel,
+            TrainPanel::formatLr,
+            TrainPanel::formatLoss,
+            TrainPanel::toggleLabelFor,
+            s -> (s == null || s.isEmpty()) ? "" : "error: " + s
+        ));
 
         return new Component.Flex(
             null, null, Em.of(0.8f), SURFACE_BG,
@@ -56,40 +80,39 @@ public final class TrainPanel {
         );
     }
 
-    private static Component buildControls(AppContext ctx) {
+    private static Component buildControls(AppContext ctx, Refs refs) {
         TrainingController controller = ctx.trainingController();
-        // Toggle button label adapts to state. We can't rebuild a Text's
-        // content via the record (it's immutable), so we use TextStates'
-        // content-override mechanism — same one the editable Text widgets
-        // use. Reading via Render goes through TextStates.contentOf.
-        // Build the button by hand (instead of Themed.button) so we hold
-        // a reference to the label Text and can mutate its content.
-        Palette palette = Theme.of(Variant.SUCCESS);
-        Component.Text toggleLabel = new Component.Text(
-            "Start", sibarum.dasum.gui.core.text.FontGroups.DEFAULT,
-            Em.of(0.85f), palette.onBase(),
-            null, null, Em.ZERO, null, false,
-            false, false, false, false, 0);
-        Component toggle = new Component.Flex(
-            Em.of(6.5f), Em.of(2f), Em.of(0.3f), palette.base(),
-            Direction.ROW, JustifyContent.CENTER, AlignItems.CENTER, Em.ZERO,
-            List.of(toggleLabel), true, 0);
-        Handlers.onClick(toggle, () -> onToggle(controller));
 
-        Component step  = Themed.button("Step",   Em.of(5.5f), Variant.INFO,    0);
-        Component stop  = Themed.button("Stop",   Em.of(5.5f), Variant.ERROR,   0);
-        Component reset = Themed.button("Reset",  Em.of(5.5f), Variant.WARNING, 0);
-        Handlers.onClick(step,  controller::step);
-        Handlers.onClick(stop,  controller::stop);
-        Handlers.onClick(reset, () -> onReset(ctx));
+        // Toggle is the one button whose glyph swaps with state (Start/Resume
+        // use the play icon, Pause uses pause). We keep a reference to the
+        // inner Text so TrainStatusRefresher can call TextStates.setContent
+        // with a fresh codepoint string on the main thread.
+        Toolbars.Toggle toggle = Toolbars.toggleIconButton(
+            Icons.PLAY, Variant.SUCCESS,
+            "Start / Pause / Resume training (Space)",
+            () -> onToggle(controller));
 
-        // Update toggle label on state changes.
-        controller.state().subscribe(s -> TextStates.setContent(toggleLabel, toggleLabelFor(s)));
+        Component step  = Toolbars.iconButton(
+            Icons.STEP_FORWARD, Variant.INFO,
+            "Step — run exactly one training example (forward + backward + step). "
+            + "Bootstraps the worker paused if not already running.",
+            controller::step);
+        Component stop  = Toolbars.iconButton(
+            Icons.SQUARE, Variant.ERROR,
+            "Stop — halt training. Parameter weights remain; click Start to resume.",
+            controller::stop);
+        Component reset = Toolbars.iconButton(
+            Icons.ROTATE_CCW, Variant.WARNING,
+            "Reset — stop training, reinitialize every trainable's weights from a "
+            + "fresh seed, clear the loss chart. Corpus and graph topology preserved.",
+            () -> onReset(ctx));
+
+        refs.toggleLabel = toggle.glyph();
 
         return new Component.Flex(
             null, Em.of(2.6f), Em.of(0.5f), TOOLBAR_BG,
             Direction.ROW, JustifyContent.START, AlignItems.CENTER, Em.of(0.6f),
-            List.of(toggle, step, stop, reset),
+            List.of(toggle.button(), step, stop, reset),
             false, 0
         );
     }
@@ -122,15 +145,22 @@ public final class TrainPanel {
         }
     }
 
+    /**
+     * Glyph codepoint the toggle button should show in a given training
+     * state, encoded as a single-char string suitable for
+     * {@link sibarum.dasum.gui.core.input.TextStates#setContent}.
+     * Start / Resume both use the {@code play} icon; Pause uses {@code pause}.
+     */
     private static String toggleLabelFor(TrainingState s) {
-        return switch (s) {
-            case IDLE, STOPPED -> "Start";
-            case RUNNING       -> "Pause";
-            case PAUSED        -> "Resume";
+        int cp = switch (s) {
+            case IDLE, STOPPED -> Icons.PLAY;
+            case RUNNING       -> Icons.PAUSE;
+            case PAUSED        -> Icons.PLAY;
         };
+        return String.valueOf((char) cp);
     }
 
-    private static Component buildParameters(TrainingController controller) {
+    private static Component buildParameters(TrainingController controller, Refs refs) {
         Property<Float> lr = controller.learningRate();
         Component lrLabel = new Component.Text("Learning rate", Em.of(0.9f), LABEL_FG);
         Component lrSlider = new Component.Slider(
@@ -152,26 +182,29 @@ public final class TrainPanel {
             Direction.ROW, JustifyContent.START, AlignItems.STRETCH, Em.ZERO,
             List.of(lrEdit), false, 0);
 
-        // Slider drag → updates lr → mirrors back into the text input.
-        // This may stomp on a half-typed value if the user is editing while
-        // dragging, but the user wouldn't typically be doing both at once.
-        lr.subscribe(v -> TextStates.setContent(lrEdit, formatLr(v)));
+        // Slider drag → updates lr → main-thread refresher mirrors back
+        // into the text input (avoids worker-thread TextStates writes when
+        // an external Property.set happens from outside the UI thread).
+        refs.lrEdit = lrEdit;
 
-        Component applyLr = Themed.button("Apply", Em.of(4.5f), Variant.PRIMARY, 0, () -> {
-            String s = TextStates.contentOf(lrEdit).trim();
-            try {
-                float v = Float.parseFloat(s);
-                if (v <= 0f || v > 10f) {
+        Component applyLr = Toolbars.iconButton(
+            Icons.CHECK, Variant.PRIMARY,
+            "Apply — parse the typed value and set the learning rate. Range (0, 10].",
+            () -> {
+                String s = TextStates.contentOf(lrEdit).trim();
+                try {
+                    float v = Float.parseFloat(s);
+                    if (v <= 0f || v > 10f) {
+                        sibarum.dasum.gui.core.status.Status.warn(
+                            "LR must be in (0, 10]; got " + s);
+                        return;
+                    }
+                    lr.set(v);
+                } catch (NumberFormatException ex) {
                     sibarum.dasum.gui.core.status.Status.warn(
-                        "LR must be in (0, 10]; got " + s);
-                    return;
+                        "LR not a number: '" + s + "'");
                 }
-                lr.set(v);
-            } catch (NumberFormatException ex) {
-                sibarum.dasum.gui.core.status.Status.warn(
-                    "LR not a number: '" + s + "'");
-            }
-        });
+            });
 
         Component stepEvery = new Component.Checkbox(Em.of(1.0f),
             CB_BOX, CB_CHECK, controller.stepEveryExample());
@@ -190,7 +223,7 @@ public final class TrainPanel {
         return String.format("%.3f", lr);
     }
 
-    private static Component buildStatus(TrainingController controller) {
+    private static Component buildStatus(TrainingController controller, Refs refs) {
         Component.Text state = labelText(
             "state: " + controller.state().get(), LABEL_FG);
         Component.Text epoch = labelText(
@@ -201,12 +234,16 @@ public final class TrainPanel {
             "loss: " + formatLoss(controller.currentLoss().get()), LABEL_FG);
         Component.Text error = labelText("", ERROR_FG);
 
-        controller.state().subscribe(s -> TextStates.setContent(state,   "state: " + s));
-        controller.currentEpoch().subscribe(v -> TextStates.setContent(epoch,   "epoch: " + v));
-        controller.currentExample().subscribe(v -> TextStates.setContent(example, "example: " + v));
-        controller.currentLoss().subscribe(v -> TextStates.setContent(loss,    "loss: " + formatLoss(v)));
-        controller.lastError().subscribe(s -> TextStates.setContent(error,
-            (s == null || s.isEmpty()) ? "" : "error: " + s));
+        // Property → TextStates writes happen on the render thread via
+        // TrainStatusRefresher.refresh — never directly from worker-fired
+        // Property.set chains (Property fires subscribers synchronously
+        // on the calling thread; the worker calls maybePublishUi, which
+        // would otherwise update TextStates from the wrong thread).
+        refs.state   = state;
+        refs.epoch   = epoch;
+        refs.example = example;
+        refs.loss    = loss;
+        refs.error   = error;
 
         return new Component.Flex(
             null, Em.AUTO, Em.of(0.5f), SURFACE_BG,

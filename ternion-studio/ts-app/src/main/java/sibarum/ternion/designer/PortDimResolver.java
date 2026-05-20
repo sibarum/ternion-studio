@@ -63,6 +63,15 @@ public final class PortDimResolver {
                     ? OptionalInt.of(2 * k.getAsInt() * in.getAsInt())
                     : OptionalInt.empty();
             }
+            // Parameter(MATRIX-4) outputs a fixed-shape vector. The "-4"
+            // is baked into the palette factory; no config knob exposes it.
+            case "input.parameter.matrix4" -> OptionalInt.of(4);
+            // IntToVector: output is a vec of dim 'dim' (embedding width).
+            case "conv.int_to_vector" -> intFrom(cfg, "dim");
+            // VectorToTensor: output is a tensor whose flat dim is the
+            // product of its shape array; for the default [4] config that's
+            // 4. Skipping for now — IntArrayField config keys make this
+            // non-trivial without a richer resolver.
             default -> OptionalInt.empty();
         };
     }

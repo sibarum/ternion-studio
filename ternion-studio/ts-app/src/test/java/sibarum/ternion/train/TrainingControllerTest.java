@@ -1,196 +1,127 @@
 package sibarum.ternion.train;
 
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import sibarum.dasum.gui.core.component.Component;
 import sibarum.dasum.gui.core.graph.Connections;
 import sibarum.dasum.gui.core.render.Color;
 import sibarum.ternion.app.AppContext;
-import sibarum.ternion.data.CorpusModel;
-import sibarum.ternion.data.InputSchema;
+import sibarum.ternion.data.source.EditableDataSource;
+import sibarum.ternion.designer.DataSourceBoundNodes;
+import sibarum.ternion.designer.DesignerPanel;
 import sibarum.ternion.designer.GraphSync;
 import sibarum.ternion.designer.NodeSpec;
 import sibarum.ternion.designer.Palette;
 
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.fail;
 
 /**
- * Phase 6 plan verification: build {@code Parameter → Add → Terminal}
- * over MATRIX-4, target a known constant, run training at LR=0.1, and
- * confirm the loss drops visibly. Then exercise pause/step semantics.
+ * Phase C training-controller contract on the LossOutput-driven path:
+ * empty-source preflight, identity-regression plumbing run, and
+ * pause/step/resume/stop state machine. All three exercise the new
+ * single-source iteration loop and the {@link DataSourceBoundNodes}
+ * sidecar; the legacy Terminal + corpus path is gone.
  */
 final class TrainingControllerTest {
 
-    @Test
-    void parameterAddTerminal_convergesAtLr01() throws Exception {
-        // Build the graph: Parameter (MATRIX-4) → Add → Terminal (MATRIX).
-        // Wire Parameter to slot 0 of Add. Leave slot 1 of Add unwired so
-        // it becomes a corpus input. Wire Add to Terminal.
-        Component.GraphSurface surface = new Component.GraphSurface(
-            null, null, new Color(0f, 0f, 0f, 0f), List.of(), true, 0);
-        GraphSync sync = new GraphSync(surface);
-        sync.install();
-
-        NodeSpec param    = sync.spawn(Palette.byKey("input.parameter.matrix4"), 0f, 0f);
-        NodeSpec add      = sync.spawn(Palette.byKey("arith.add"),               4f, 0f);
-        NodeSpec terminal = sync.spawn(Palette.byKey("output.terminal.matrix"),  8f, 0f);
-
-        Connections.add(surface, param.outputPort(),    add.orderedInputPorts().get(0));
-        Connections.add(surface, add.outputPort(),      terminal.orderedInputPorts().get(0));
-
-        CorpusModel corpus = new CorpusModel();
-        corpus.detectFromGraph(sync, terminal.cgNode());
-        // Schema should be: one MATRIX input (Add slot 1), MATRIX target.
-        assertEquals(1, corpus.inputSchema().size(), "one unwired slot");
-
-        AppContext ctx = new AppContext(surface, sync, corpus);
-        TrainingController controller = new TrainingController(ctx);
-        ctx.attachTrainingController(controller);
-
-        // MATRIX cells aren't editable through the CorpusModel parser, so
-        // we install a target-and-input via a programmatic corpus.
-        // The controller pulls examples via ctx.corpus().toCorpus(),
-        // which respects parsed cells only. Workaround: install a
-        // bespoke corpus directly by injecting a CorpusModel substitute
-        // — but Phase 5's CorpusModel only supports STRING/NUMBER. For
-        // this test we drive training via a numeric scalar instead:
-        // replace the graph with a NUMBER terminal so the parser path
-        // is sufficient.
-        // ----------------------------------------------------------------
-        // ↳ Re-build with NUMBER-targeted graph.
-        controller.stop();
-        Component.GraphSurface s2 = new Component.GraphSurface(
-            null, null, new Color(0f, 0f, 0f, 0f), List.of(), true, 0);
-        GraphSync sync2 = new GraphSync(s2);
-        sync2.install();
-
-        // For a NUMBER regression, the simplest setup is a NUMBER
-        // Terminal with one unwired NUMBER slot — the example's NUMBER
-        // input becomes the slot's value, and the network is a
-        // pass-through. Adding a learnable scalar Parameter on the
-        // input side requires a NUMBER Parameter variant which isn't in
-        // the palette — Parameter (MATRIX-4) is matrix-only.
-        // Instead, exercise the Trainable backprop path with
-        // Linear(4→4) by switching to MATRIX targets and providing
-        // them as constructed values via a custom CorpusModel-bypass
-        // path.
-        NodeSpec p2  = sync2.spawn(Palette.byKey("input.parameter.matrix4"), 0f, 0f);
-        NodeSpec lin = sync2.spawn(Palette.byKey("linear.linear"),           4f, 0f);
-        NodeSpec t2  = sync2.spawn(Palette.byKey("output.terminal.matrix"),  8f, 0f);
-        Connections.add(s2, p2.outputPort(),  lin.orderedInputPorts().get(0));
-        Connections.add(s2, lin.outputPort(), t2.orderedInputPorts().get(0));
-
-        CorpusModel corpus2 = new CorpusModel();
-        corpus2.detectFromGraph(sync2, t2.cgNode());
-        // No unwired slots — corpus needs at least one to be useful,
-        // but for a Parameter-only training task, target alone is enough.
-        // toCorpus parses targets too; MATRIX target isn't parseable.
-        // So this test demonstrates the controller's wiring AND the
-        // limitation that drives the deferred "MATRIX cell editor" task.
-        // The controller should stop with an error if started over an
-        // empty / invalid corpus.
-
-        AppContext ctx2 = new AppContext(s2, sync2, corpus2);
-        TrainingController controller2 = new TrainingController(ctx2);
-        ctx2.attachTrainingController(controller2);
-
-        // MATRIX targets aren't parseable by the corpus editor, so
-        // corpus.toCorpus() yields 0 examples. The Phase 10 preflight
-        // refuses to start training in that case; state stays IDLE and
-        // lastError carries an explanation.
-        controller2.start();
-        assertEquals(TrainingState.IDLE, controller2.state().get(),
-            "preflight blocks start when corpus is empty");
-        assertTrue(controller2.lastError().get().contains("corpus"),
-            "lastError mentions the empty corpus, got: " + controller2.lastError().get());
-        controller2.stop();
-        assertEquals(TrainingState.IDLE, controller2.state().get(),
-            "stop after a refused start is a no-op");
+    @BeforeEach
+    void resetSidecar() {
+        DataSourceBoundNodes.clearForTesting();
     }
 
     @Test
-    void numericRegression_convergesVisibly() throws Exception {
-        // The simplest training task that exercises all the wiring:
-        // NUMBER Terminal with a single unwired NUMBER input. Each
-        // example supplies (input=k, target=k); identity regression.
-        // No Trainables exist in this graph (Terminal isn't Trainable),
-        // so no parameters move and the loss is dictated entirely by
-        // input vs target — but the *plumbing* (binder, backprop visit,
-        // node-runtime snapshots, loss history append) all executes.
-        // This proves the controller path end-to-end without needing
-        // MATRIX cell parsing.
-        Component.GraphSurface s = new Component.GraphSurface(
-            null, null, new Color(0f, 0f, 0f, 0f), List.of(), true, 0);
-        GraphSync sync = new GraphSync(s);
-        sync.install();
-
-        NodeSpec term = sync.spawn(Palette.byKey("output.terminal.number"), 0f, 0f);
-        CorpusModel corpus = new CorpusModel();
-        corpus.detectFromGraph(sync, term.cgNode());
-        assertEquals(1, corpus.inputSchema().size());
-        InputSchema in = corpus.inputSchema().get(0);
-
-        for (int i = 0; i < 3; i++) {
-            corpus.addRow();
-            corpus.setLabel(i, "ex" + i);
-            corpus.setInputCell(i, in.key(), Double.toString(0.7 + i * 0.1));
-            corpus.setTargetCell(i, Double.toString(0.7 + i * 0.1));
-        }
-
-        AppContext ctx = new AppContext(s, sync, corpus);
+    void emptySource_preflightBlocks() {
+        // LossOutput bound to a source with zero rows → preflight refuses
+        // to start; state stays IDLE; lastError mentions the empty source.
+        Component.GraphSurface surface = newSurface();
+        GraphSync sync = newSync(surface);
+        AppContext ctx = new AppContext(surface, sync);
         TrainingController controller = new TrainingController(ctx);
         ctx.attachTrainingController(controller);
 
+        EditableDataSource src = new EditableDataSource(
+            "empty_fixture", "Empty", List.of("target"));
+        ctx.dataSources().add(src);
+
+        NodeSpec param = sync.spawn(Palette.byKey("input.parameter.matrix4"), 0f, 0f);
+        NodeSpec loss = sync.spawn(Palette.byKey("output.loss"), 6f, 0f, lossCfg("empty_fixture:target"));
+        DesignerPanel.afterSpawn(sync, param);
+        DesignerPanel.afterSpawn(sync, loss);
+        Connections.add(surface, param.outputPort(), loss.orderedInputPorts().get(0));
+
+        controller.start();
+        assertEquals(TrainingState.IDLE, controller.state().get(),
+            "preflight blocks start when source is empty");
+        assertTrue(controller.lastError().get().contains("no rows"),
+            "lastError mentions empty source, got: " + controller.lastError().get());
+    }
+
+    @Test
+    void identityRegression_runsAndAppendsLossHistory() throws Exception {
+        // The simplest training task that exercises the LossOutput
+        // backward seed + reverse-topo walk + lossHistory append:
+        // Parameter (MATRIX-4) → Loss Output(source, target, MATRIX, MSE)
+        // with a single source row. No graph Trainables move (Parameter
+        // IS the trainable; loss > 0 → step → param drifts toward target).
+        Component.GraphSurface surface = newSurface();
+        GraphSync sync = newSync(surface);
+        AppContext ctx = new AppContext(surface, sync);
+        TrainingController controller = new TrainingController(ctx);
+        ctx.attachTrainingController(controller);
+
+        EditableDataSource src = new EditableDataSource(
+            "identity_fixture", "Identity", List.of("target"));
+        for (int i = 0; i < 3; i++) {
+            int r = src.addRow();
+            src.setCell(r, 0, "0.7, 0.7, 0.7, 0.7");
+        }
+        ctx.dataSources().add(src);
+
+        NodeSpec param = sync.spawn(Palette.byKey("input.parameter.matrix4"), 0f, 0f);
+        NodeSpec loss = sync.spawn(Palette.byKey("output.loss"), 6f, 0f, lossCfg("identity_fixture:target"));
+        DesignerPanel.afterSpawn(sync, param);
+        DesignerPanel.afterSpawn(sync, loss);
+        Connections.add(surface, param.outputPort(), loss.orderedInputPorts().get(0));
+
         controller.start();
         // Let it run several examples.
-        Thread.sleep(300);
+        Thread.sleep(150);
         controller.stop();
 
-        // The loss is 0 throughout because target == input through
-        // identity Terminal. So loss history should be non-empty AND
-        // all-near-zero.
         assertTrue(controller.lossHistory().size() > 0,
             "loss history populated after run");
-        for (LossHistory.Sample s2 : controller.lossHistory().snapshot()) {
-            assertTrue(s2.loss() < 1e-9,
-                "identity regression loss ≈ 0, got " + s2.loss());
-        }
         assertEquals(TrainingState.STOPPED, controller.state().get());
-
-        // NodeRuntime should have a snapshot for the terminal node.
-        NodeRuntime.Snapshot snap = controller.nodeRuntime().of(term.cgNode());
-        assertNotNull(snap);
-        assertTrue(snap.preview().startsWith("num "),
-            "terminal node-runtime snapshot reflects NUMBER output, got: " + snap.preview());
     }
 
     @Test
     void pauseStepResumeStop_obeysStateMachine() throws Exception {
-        Component.GraphSurface s = new Component.GraphSurface(
-            null, null, new Color(0f, 0f, 0f, 0f), List.of(), true, 0);
-        GraphSync sync = new GraphSync(s);
-        sync.install();
-        NodeSpec term = sync.spawn(Palette.byKey("output.terminal.number"), 0f, 0f);
-
-        CorpusModel corpus = new CorpusModel();
-        corpus.detectFromGraph(sync, term.cgNode());
-        InputSchema in = corpus.inputSchema().get(0);
-        for (int i = 0; i < 50; i++) {
-            corpus.addRow();
-            corpus.setInputCell(i, in.key(), "1.0");
-            corpus.setTargetCell(i, "0.5");
-        }
-
-        AppContext ctx = new AppContext(s, sync, corpus);
+        Component.GraphSurface surface = newSurface();
+        GraphSync sync = newSync(surface);
+        AppContext ctx = new AppContext(surface, sync);
         TrainingController controller = new TrainingController(ctx);
         ctx.attachTrainingController(controller);
 
+        EditableDataSource src = new EditableDataSource(
+            "state_fixture", "State", List.of("target"));
+        for (int i = 0; i < 50; i++) {
+            int r = src.addRow();
+            src.setCell(r, 0, "0.5, 0.5, 0.5, 0.5");
+        }
+        ctx.dataSources().add(src);
+
+        NodeSpec param = sync.spawn(Palette.byKey("input.parameter.matrix4"), 0f, 0f);
+        NodeSpec loss = sync.spawn(Palette.byKey("output.loss"), 6f, 0f, lossCfg("state_fixture:target"));
+        DesignerPanel.afterSpawn(sync, param);
+        DesignerPanel.afterSpawn(sync, loss);
+        Connections.add(surface, param.outputPort(), loss.orderedInputPorts().get(0));
+
         controller.start();
-        // Give the worker time to process a few examples.
         Thread.sleep(50);
         assertEquals(TrainingState.RUNNING, controller.state().get());
 
@@ -205,9 +136,7 @@ final class TrainingControllerTest {
         controller.step();
         // Wait for the loss-history count to advance (worker processed
         // the step) and then for atRest to return true (worker parked
-        // back). Polling stepCount avoids the can't-distinguish-still-
-        // parked-from-already-restepped race that observing atRest alone
-        // has — atRest was already true when we called step().
+        // back).
         long deadline = System.currentTimeMillis() + 1000;
         while (controller.lossHistory().stepCount() == beforeStep && System.currentTimeMillis() < deadline) {
             Thread.sleep(5);
@@ -228,6 +157,27 @@ final class TrainingControllerTest {
 
         controller.stop();
         assertEquals(TrainingState.STOPPED, controller.state().get());
+    }
+
+    // ---------- helpers ----------
+
+    private static Component.GraphSurface newSurface() {
+        return new Component.GraphSurface(
+            null, null, new Color(0f, 0f, 0f, 0f), List.of(), true, 0);
+    }
+
+    private static GraphSync newSync(Component.GraphSurface s) {
+        GraphSync sync = new GraphSync(s);
+        sync.install();
+        return sync;
+    }
+
+    private static Map<String, Object> lossCfg(String source) {
+        Map<String, Object> cfg = new LinkedHashMap<>();
+        cfg.put("source",    source);
+        cfg.put("inputType", "MATRIX");
+        cfg.put("lossFn",    "MSE");
+        return cfg;
     }
 
     private static void waitForAtRest(TrainingController c, boolean target, long timeoutMs) throws InterruptedException {

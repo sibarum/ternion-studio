@@ -18,7 +18,6 @@ import sibarum.ternion.designer.config.ConfigField;
 import sibarum.ternion.train.NodeRuntime;
 import sibarum.mcc.graph.CompGraphNode;
 import sibarum.mcc.graph.ComputationGraph;
-import sibarum.mcc.op.Terminal;
 import sibarum.mcc.value.MatrixValue;
 import sibarum.mcc.value.NumberValue;
 import sibarum.mcc.value.Value;
@@ -49,7 +48,7 @@ public final class DesignerPanel {
         registerPaletteCommands(sync);
         wireNodeRuntimeUpdates(ctx);
 
-        Component toolbar = buildToolbar(sync);
+        Component toolbar = buildToolbar(ctx);
 
         // Surface was constructed with flexGrow=1 in MainShell so we don't
         // need (and must not) transform it here. Calling .withFlexGrow would
@@ -63,7 +62,8 @@ public final class DesignerPanel {
         );
     }
 
-    private static Component buildToolbar(GraphSync sync) {
+    private static Component buildToolbar(AppContext ctx) {
+        GraphSync sync = ctx.graphSync();
         Component hint = new Component.Text(
             "Right-click surface to add a node · right-click a node to delete · drag port-to-port to wire",
             Em.of(0.85f), LABEL_FG);
@@ -71,16 +71,25 @@ public final class DesignerPanel {
             null, Em.of(2f), Em.ZERO, new Color(0f, 0f, 0f, 0f),
             Direction.ROW, JustifyContent.START, AlignItems.CENTER, Em.ZERO,
             List.of(), false, 1);
-        Component runBtn = Themed.button("Run Forward", Em.of(8f), Variant.SUCCESS, 0);
-        Handlers.onClick(runBtn, () -> runForward(sync));
+
+        // Icon-only buttons — Run Forward = play, Training Step = step-forward.
+        Component runBtn  = sibarum.ternion.app.Toolbars.iconButton(
+            sibarum.ternion.app.generated.Icons.PLAY, Variant.SUCCESS,
+            "Run Forward — execute one forward pass through the graph; publishes to any visualizer nodes.",
+            () -> runForward(sync));
+        Component stepBtn = sibarum.ternion.app.Toolbars.iconButton(
+            sibarum.ternion.app.generated.Icons.STEP_FORWARD, Variant.INFO,
+            "Training Step — advance training by exactly one example (forward + backward + step). Bootstraps the worker paused if not already running.",
+            () -> ctx.trainingController().step());
 
         return new Component.Flex(
             null, Em.of(2.5f), Em.of(0.4f), TOOLBAR_BG,
             Direction.ROW, JustifyContent.START, AlignItems.CENTER, Em.of(0.5f),
-            List.of(hint, spacer, runBtn),
+            List.of(hint, spacer, runBtn, stepBtn),
             false, 0
         );
     }
+
 
     /**
      * Wire the controller's {@link NodeRuntime} to each spawned node's
@@ -145,9 +154,26 @@ public final class DesignerPanel {
     private static void finalizeSpawn(GraphSync sync, PaletteItem palette,
                                       float emX, float emY, Map<String, Object> config) {
         NodeSpec spec = sync.spawn(palette, emX, emY, config);
+        afterSpawn(sync, spec);
+        Invalidator.invalidate();
+    }
+
+    /**
+     * Canonical post-spawn wiring: visualizer decoration (no-op for
+     * non-visualizer nodes), node right-click menu (Delete / Properties),
+     * and the default port context menus (disconnect, etc.).
+     *
+     * <p>Call after every {@link GraphSync#spawn} that isn't going through
+     * {@link #finalizeSpawn} — e.g. {@code DemoFixtures} bulk-spawns,
+     * {@code ProjectIo} load, {@code replaceConfig} respawns. Skipping any
+     * of these leaves nodes silently inert for right-click and missing
+     * their visualizer thumbnail.
+     */
+    public static void afterSpawn(GraphSync sync, NodeSpec spec) {
+        VisualizerNodes.decorateIfApplicable(spec);
+        DataSourceBoundNodes.registerIfApplicable(spec);
         wireNodeContextMenu(sync, spec);
         PortContextMenu.registerDefaults(spec.visual());
-        Invalidator.invalidate();
     }
 
     private static void wireNodeContextMenu(GraphSync sync, NodeSpec spec) {
@@ -178,9 +204,21 @@ public final class DesignerPanel {
             palette.configSchema(),
             spec.config(),
             newConfig -> {
-                GraphSync.ReplaceResult result = sync.replaceConfig(spec, newConfig);
-                wireNodeContextMenu(sync, result.newSpec());
-                sibarum.dasum.gui.core.input.PortContextMenu.registerDefaults(result.newSpec().visual());
+                GraphSync.ReplaceResult result;
+                try {
+                    result = sync.replaceConfig(spec, newConfig);
+                } catch (RuntimeException ex) {
+                    // Pre-validation in replaceConfig keeps the old node
+                    // intact when the new config is invalid; surface
+                    // the message + invalidate so the user sees a toast
+                    // instead of an uncaught throw + stale UI.
+                    sibarum.dasum.gui.core.status.Status.error(
+                        "Properties: " + ex.getMessage(),
+                        stackTraceOf(ex));
+                    sibarum.dasum.gui.core.event.Invalidator.invalidate();
+                    return;
+                }
+                afterSpawn(sync, result.newSpec());
                 String msg = "Updated " + palette.label() + " (id " + result.newSpec().cgNode().id() + ")";
                 if (result.connectionsPreserved() > 0) {
                     msg += " — " + result.connectionsPreserved() + " connection(s) preserved";
@@ -195,22 +233,31 @@ public final class DesignerPanel {
     }
 
     /**
-     * Phase 3 smoke-test action. Finds a Terminal node, snapshots the
-     * graph, binds NUMBER/MATRIX root values for any unwired slots from
-     * fixed defaults, and runs {@link ComputationGraph#execute}.
-     * Prints to stdout (the Train tab will replace this in Phase 6).
+     * Dev smoke-test action. Finds the Loss Output sink, snapshots the
+     * graph, binds NUMBER/MATRIX root values for any unwired non-source
+     * slots from fixed defaults, and runs {@link ComputationGraph#execute}.
      */
     private static void runForward(GraphSync sync) {
-        NodeSpec terminalSpec = findTerminal(sync);
-        if (terminalSpec == null) {
-            Status.error("Run Forward: no Terminal node in graph",
-                "Spawn a Terminal node via right-click or Ctrl+Space before running.");
+        NodeSpec lossSpec = findLossOutput(sync);
+        if (lossSpec == null) {
+            Status.error("Run Forward: no Loss Output node in graph",
+                "Spawn a Loss Output via right-click or Ctrl+Space before running.");
             return;
         }
         try {
-            ComputationGraph graph = sync.snapshot(terminalSpec.cgNode());
+            ComputationGraph graph = sync.snapshot(lossSpec.cgNode());
             bindUnwiredSlots(sync, graph);
             Value out = graph.execute();
+            // Forward-only visualizer publish: no backward pass during
+            // Run Forward, so gradient is null and visualizers will fall
+            // back to forward-only (cool trail, no warm).
+            for (CompGraphNode n : graph.nodes()) {
+                sibarum.ternion.designer.VisualizerNodes.Entry vis
+                    = sibarum.ternion.designer.VisualizerNodes.of(n);
+                if (vis != null) {
+                    sibarum.ternion.train.VisualizerTap.publish(vis, n.producedValue(), null);
+                }
+            }
             Status.info("Run forward: " + formatValue(out));
         } catch (Exception e) {
             Status.error("Run forward failed: " + e.getMessage(),
@@ -224,9 +271,9 @@ public final class DesignerPanel {
         return sw.toString();
     }
 
-    private static NodeSpec findTerminal(GraphSync sync) {
+    private static NodeSpec findLossOutput(GraphSync sync) {
         for (NodeSpec spec : sync.liveNodes()) {
-            if (spec.tNode().primitive() instanceof Terminal) return spec;
+            if (spec.tNode().primitive() instanceof LossOutputPrimitive) return spec;
         }
         return null;
     }

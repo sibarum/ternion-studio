@@ -22,6 +22,10 @@
         </dependency>
         <dependency>
             <groupId>sibarum.dasum.gui</groupId>
+            <artifactId>dasum-vis</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>sibarum.dasum.gui</groupId>
             <artifactId>dasum-glfw</artifactId>
             <scope>runtime</scope>
         </dependency>
@@ -81,6 +85,25 @@
                             <atlasSize>1024</atlasSize>
                             <fontSize>32</fontSize>
                             <pxRange>4</pxRange>
+                        </atlas>
+                        <atlas>
+                            <name>icons</name>
+                            <font>${project.basedir}/fonts/lucide/lucide.ttf</font>
+                            <atlasSize>1024</atlasSize>
+                            <fontSize>40</fontSize>
+                            <pxRange>4</pxRange>
+                            <icons>
+                                <manifest>${project.basedir}/fonts/lucide/info.json</manifest>
+                                <manifestFormat>lucide</manifestFormat>
+                                <glyphList>
+                                    unplug, scatter-chart, maximize-2, x, box, eye,
+                                    play, step-forward, pause, square, rotate-ccw,
+                                    plus, trash-2, check, scan-search, database
+                                </glyphList>
+                                <generatedSourcesDir>${project.build.directory}/generated-sources/dasum-msdf</generatedSourcesDir>
+                                <packageName>sibarum.ternion.app.generated</packageName>
+                                <className>Icons</className>
+                            </icons>
                         </atlas>
                     </atlases>
                 </configuration>

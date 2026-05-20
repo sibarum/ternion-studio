@@ -21,14 +21,17 @@ import sibarum.mcc.op.Softmax;
 import sibarum.mcc.op.Sub;
 import sibarum.mcc.op.Tanh;
 import sibarum.mcc.op.TensorToVector;
-import sibarum.mcc.op.Terminal;
 import sibarum.mcc.op.TernionToVector;
 import sibarum.mcc.op.VectorToInt;
 import sibarum.mcc.op.VectorToQuaternion;
 import sibarum.mcc.op.VectorToTensor;
 import sibarum.mcc.op.VectorToTernion;
+import sibarum.mcc.embedding.AutoTokenizer;
+import sibarum.mcc.embedding.AutoTokenizer2D;
 import sibarum.mcc.op.advanced.SmoothedBasisElement.Kernel;
 import sibarum.mcc.value.ValueType;
+import sibarum.ternion.data.curated.CuratedDataset;
+import sibarum.ternion.data.curated.CuratedDatasets;
 import sibarum.ternion.designer.config.ConfigField;
 import sibarum.ternion.designer.config.ConfigField.BoolField;
 import sibarum.ternion.designer.config.ConfigField.DoubleField;
@@ -54,6 +57,8 @@ public final class Palette {
     private static final Color BG_GEOMETRY   = new Color(0.32f, 0.28f, 0.22f, 1f);
     private static final Color BG_RESHAPE    = new Color(0.22f, 0.32f, 0.35f, 1f);
     private static final Color BG_CONVERSION = new Color(0.30f, 0.30f, 0.30f, 1f);
+    private static final Color BG_VISUALIZER = new Color(0.18f, 0.22f, 0.28f, 1f);
+    private static final Color BG_EMBEDDING  = new Color(0.35f, 0.22f, 0.32f, 1f);
 
     private static final Random RNG = new Random(0xC0FFEE);
 
@@ -68,6 +73,32 @@ public final class Palette {
             "input.parameter.matrix4", "Parameter (MATRIX-4)",
             PaletteItem.Category.INPUT, BG_INPUT,
             cfg -> new Parameter(ValueType.MATRIX, new int[] { 4 }, RNG.nextLong()),
+            "value"));
+
+        // INPUT — Dataset Column. Source primitive that emits one column
+        // from a bundled curated dataset; each training step the trainer
+        // advances the row and every dataset column publishes its
+        // current cell. Pair with AutoTokenizer to feed real text into
+        // the graph. See DatasetColumnPrimitive / DatasetColumns sidecar.
+        list.add(PaletteItem.source(
+            "input.dataset.column", "Dataset Column",
+            PaletteItem.Category.INPUT, BG_INPUT,
+            List.of(
+                new EnumField("source",     "Source",      defaultDatasetSource(), allDatasetSources()),
+                new EnumField("outputType", "Output type", "STRING",               List.of("STRING", "NUMBER", "MATRIX"))
+            ),
+            cfg -> {
+                String source = (String) cfg.get("source");
+                int colon = source.lastIndexOf(':');
+                if (colon < 0) {
+                    throw new IllegalArgumentException(
+                        "Dataset Column source must be 'datasetId:columnName'; got: " + source);
+                }
+                String datasetId  = source.substring(0, colon);
+                String columnName = source.substring(colon + 1);
+                ValueType outputType = ValueType.valueOf((String) cfg.get("outputType"));
+                return new DatasetColumnPrimitive(datasetId, columnName, outputType);
+            },
             "value"));
 
         // ARITHMETIC.
@@ -125,15 +156,38 @@ public final class Palette {
         list.add(PaletteItem.binary("geom.cosine",  "CosineSim",   PaletteItem.Category.GEOMETRY, BG_GEOMETRY, cfg -> new CosineSimilarity(), "a", "b", "result"));
         list.add(PaletteItem.binary("geom.simgate", "SimGate (Q)", PaletteItem.Category.GEOMETRY, BG_GEOMETRY, cfg -> new SimilarityGate(), "a", "b", "result"));
 
-        // OUTPUT — Terminal variants for the common types.
+        // OUTPUT — Loss Output. Unified sink that fuses Terminal +
+        // Expected Output: predicted wires into the only input port,
+        // and the supervisory target is read from a configured
+        // (source, column) cell at the trainer's current row. The
+        // produced value is the scalar loss, so the trainer's backward
+        // seed becomes the trivial dL/dL=1 regardless of loss fn.
+        // See LossOutputPrimitive / DataSourceBoundNodes sidecar.
         list.add(PaletteItem.unary(
-            "output.terminal.matrix", "Terminal (MATRIX)",
+            "output.loss", "Loss Output",
             PaletteItem.Category.OUTPUT, BG_OUTPUT,
-            cfg -> new Terminal(ValueType.MATRIX), "in", null));
-        list.add(PaletteItem.unary(
-            "output.terminal.number", "Terminal (NUMBER)",
-            PaletteItem.Category.OUTPUT, BG_OUTPUT,
-            cfg -> new Terminal(ValueType.NUMBER), "in", null));
+            List.of(
+                new EnumField("source",     "Source",         defaultDatasetSource(), allDatasetSources()),
+                new EnumField("inputType",  "Predicted type", "MATRIX", List.of("NUMBER", "MATRIX")),
+                new EnumField("lossFn",     "Loss fn",        "MSE",    List.of("MSE", "CATEGORICAL")),
+                new IntField("numClasses",  "Num classes (CATEGORICAL only)", 16, 1, 4096)
+            ),
+            cfg -> {
+                String source = (String) cfg.get("source");
+                int colon = source.lastIndexOf(':');
+                if (colon < 0) {
+                    throw new IllegalArgumentException(
+                        "Loss Output source must be 'sourceId:columnName'; got: " + source);
+                }
+                String sourceId  = source.substring(0, colon);
+                String columnName = source.substring(colon + 1);
+                ValueType inputType = ValueType.valueOf((String) cfg.get("inputType"));
+                LossOutputPrimitive.LossFn lossFn =
+                    LossOutputPrimitive.LossFn.valueOf((String) cfg.get("lossFn"));
+                int numClasses = ((Number) cfg.get("numClasses")).intValue();
+                return new LossOutputPrimitive(sourceId, columnName, inputType, lossFn, numClasses);
+            },
+            "predicted", null));
 
         // CONVERSIONS between MATRIX and the other value types.
         list.add(PaletteItem.unary("conv.ternion_to_vector",  "Ternion → Vector",   PaletteItem.Category.CONVERSION, BG_CONVERSION, cfg -> new TernionToVector(),    "t", "v"));
@@ -147,6 +201,52 @@ public final class Palette {
         list.add(PaletteItem.unary("conv.vector_to_tensor",   "Vector → Tensor (shape=[4])", PaletteItem.Category.CONVERSION, BG_CONVERSION,
             cfg -> new VectorToTensor(new int[] { 4 }), "v", "t"));
 
+        // VISUALIZER — identity pass-through that taps the wire's forward
+        // value + backward gradient and renders them as a live point cloud.
+        // No effect on training math; cost is per-step snapshot construction.
+        list.add(PaletteItem.unary(
+            "visualizer.matrix", "Visualizer (MATRIX)",
+            PaletteItem.Category.VISUALIZER, BG_VISUALIZER,
+            cfg -> new VisualizerPrimitive(ValueType.MATRIX),
+            "in", "out"));
+
+        // EMBEDDING — 1-D auto-tokenizer (STRING → NUMBER). Vocab grows on
+        // first sight; mode controls how new ids are distributed across
+        // [0, idRange). Feed into IntToVector (with matching vocabSize)
+        // for a learnable embedding.
+        list.add(PaletteItem.unary(
+            "embedding.auto_tokenizer", "AutoTokenizer (STRING → NUMBER)",
+            PaletteItem.Category.EMBEDDING, BG_EMBEDDING,
+            List.of(
+                new EnumField("mode",    "Mode",     "DISTRIBUTED",
+                    List.of("SEQUENTIAL", "RANDOM", "DISTRIBUTED")),
+                new IntField("idRange", "ID range",  256, 2, 65536),
+                new IntField("seed",    "Seed",      0,   Integer.MIN_VALUE, Integer.MAX_VALUE)
+            ),
+            cfg -> new AutoTokenizerPrimitive(
+                AutoTokenizer.Mode.valueOf((String) cfg.get("mode")),
+                ((Number) cfg.get("idRange")).intValue(),
+                ((Number) cfg.get("seed")).longValue()),
+            "text", "id"));
+
+        // EMBEDDING — 2-D auto-tokenizer (STRING → MATRIX[2]). Coord is
+        // (x, y) packed into a length-2 MATRIX; downstream nodes can
+        // index into a 2-D embedding table or use the coord directly.
+        list.add(PaletteItem.unary(
+            "embedding.auto_tokenizer_2d", "AutoTokenizer 2D (STRING → MATRIX[2])",
+            PaletteItem.Category.EMBEDDING, BG_EMBEDDING,
+            List.of(
+                new EnumField("mode",  "Mode",   "SUNFLOWER",
+                    List.of("GRID", "RANDOM", "SUNFLOWER", "GAUSSIAN_PRIME")),
+                new IntField("range", "Range",  256, 2, 65536),
+                new IntField("seed",  "Seed",   0,   Integer.MIN_VALUE, Integer.MAX_VALUE)
+            ),
+            cfg -> new AutoTokenizer2DPrimitive(
+                AutoTokenizer2D.Mode.valueOf((String) cfg.get("mode")),
+                ((Number) cfg.get("range")).intValue(),
+                ((Number) cfg.get("seed")).longValue()),
+            "text", "coord"));
+
         return List.copyOf(list);
     }
 
@@ -159,6 +259,29 @@ public final class Palette {
             if (item.key().equals(key)) return item;
         }
         return null;
+    }
+
+    /** Every {@code datasetId:columnName} known to {@link CuratedDatasets}.
+     *  Used as the {@code source} EnumField's choice list for the
+     *  Dataset Column palette entry. */
+    private static List<String> allDatasetSources() {
+        List<String> out = new ArrayList<>();
+        for (CuratedDataset ds : CuratedDatasets.all()) {
+            for (String col : ds.columns()) {
+                out.add(ds.id() + ":" + col);
+            }
+        }
+        if (out.isEmpty()) out.add("none:none");
+        return List.copyOf(out);
+    }
+
+    private static String defaultDatasetSource() {
+        for (CuratedDataset ds : CuratedDatasets.all()) {
+            if (!ds.columns().isEmpty()) {
+                return ds.id() + ":" + ds.columns().get(0);
+            }
+        }
+        return "none:none";
     }
 
     private Palette() {}

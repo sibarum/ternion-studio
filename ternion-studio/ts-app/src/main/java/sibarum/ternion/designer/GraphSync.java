@@ -63,9 +63,24 @@ public final class GraphSync {
     private final List<Component> nodeOrder = new ArrayList<>();
     /** Port Component → binding (covers ports across every node). */
     private final Map<Component, PortBinding> portBindings = new IdentityHashMap<>();
+    /** Bumps on every structural mutation (spawn / removeNode / clearAll /
+     *  replaceConfig / connection ADDED / connection REMOVED). The
+     *  unsaved-changes hook subscribes to this to flip
+     *  {@code Project.dirty}. */
+    private final sibarum.dasum.gui.core.reactive.Property<Integer> mutationVersion
+        = new sibarum.dasum.gui.core.reactive.Property<>(0);
 
     public GraphSync(Component.GraphSurface surface) {
         this.surface = surface;
+    }
+
+    /** Observable counter that bumps on every structural mutation. */
+    public sibarum.dasum.gui.core.reactive.Property<Integer> mutationVersion() {
+        return mutationVersion;
+    }
+
+    private void bumpMutation() {
+        mutationVersion.set(mutationVersion.get() + 1);
     }
 
     /** Install dasum-side hooks (connection listener + rule). Call once at startup. */
@@ -169,6 +184,7 @@ public final class GraphSync {
         for (Map.Entry<Component, PortBinding> e : spec.portBindings().entrySet()) {
             portBindings.put(e.getKey(), e.getValue());
         }
+        bumpMutation();
         return spec;
     }
 
@@ -180,6 +196,11 @@ public final class GraphSync {
     public void clearAll() {
         List<Component> snapshot = new ArrayList<>(nodeOrder);
         for (Component v : snapshot) {
+            NodeSpec spec = nodes.get(v);
+            if (spec != null) {
+                VisualizerNodes.unregister(spec);
+                DataSourceBoundNodes.unregister(spec);
+            }
             Components.detach(v);
         }
         nodes.clear();
@@ -187,6 +208,7 @@ public final class GraphSync {
         portBindings.clear();
         FrozenNodes.clearAll();
         FrozenBadge.clearAll();
+        bumpMutation();
         Invalidator.invalidate();
     }
 
@@ -211,6 +233,9 @@ public final class GraphSync {
             portBindings.remove(port);
         }
         FrozenNodes.unmark(spec.cgNode());
+        VisualizerNodes.unregister(spec);
+        DataSourceBoundNodes.unregister(spec);
+        bumpMutation();
         Invalidator.invalidate();
     }
 
@@ -287,6 +312,19 @@ public final class GraphSync {
         if (item == null) {
             throw new IllegalStateException("Palette item not found: " + oldSpec.paletteKey());
         }
+        // Pre-flight: construct the primitive against newConfig BEFORE
+        // touching graph state, so an invalid config (typed
+        // mismatch, out-of-range int, etc.) surfaces as a plain
+        // IllegalArgumentException and the old node + its wiring
+        // stays in place.
+        try {
+            item.tryCreatePrimitive(newConfig);
+        } catch (RuntimeException factoryErr) {
+            throw new IllegalArgumentException(
+                "Invalid config for " + item.label() + ": " + factoryErr.getMessage(),
+                factoryErr);
+        }
+
         GraphSurfacePositions.Pos pos = GraphSurfacePositions.of(surface, oldSpec.visual());
         float emX = pos.emX();
         float emY = pos.emY();
@@ -395,5 +433,12 @@ public final class GraphSync {
                 }
             }
         }
+        bumpMutation();
+        // Refresh status icon on either end if it's a visualizer node.
+        // Cheap no-op when the spec isn't a visualizer.
+        NodeSpec fromSpec = specForPort(ev.connection().from());
+        NodeSpec toSpec   = specForPort(ev.connection().to());
+        if (fromSpec != null) VisualizerNodes.onConnectionsChanged(fromSpec, this);
+        if (toSpec   != null) VisualizerNodes.onConnectionsChanged(toSpec, this);
     }
 }

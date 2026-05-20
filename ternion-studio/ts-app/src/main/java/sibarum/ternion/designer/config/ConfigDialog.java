@@ -178,9 +178,21 @@ public final class ConfigDialog {
                 Direction.ROW, JustifyContent.START, AlignItems.CENTER, Em.of(0.4f),
                 List.of(radio, label), false, 0));
         }
+        // Stack vertically when a horizontal row would overflow the
+        // ~22em input column on a 30em dialog. Cheap heuristic: more
+        // than 3 choices OR any choice longer than 16 chars. Keeps the
+        // common case (DELTA/BOX/TENT, SEQUENTIAL/RANDOM/DISTRIBUTED)
+        // horizontal; switches multi-column / long-label enums (Dataset
+        // Column sources, AutoTokenizer2D mode incl. GAUSSIAN_PRIME) to
+        // a scannable column.
+        boolean stacked = f.choices().size() > 3
+            || f.choices().stream().anyMatch(c -> c.length() > 16);
         Component groupFlex = new Component.Flex(
             null, Em.AUTO, Em.ZERO, TRANSPARENT,
-            Direction.ROW, JustifyContent.START, AlignItems.CENTER, Em.of(1.2f),
+            stacked ? Direction.COLUMN : Direction.ROW,
+            JustifyContent.START,
+            stacked ? AlignItems.START : AlignItems.CENTER,
+            stacked ? Em.of(0.25f) : Em.of(1.2f),
             children, false, 1);
         readers.put(f.key(), group::get);
         return labeledRow(f.label(), groupFlex);

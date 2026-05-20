@@ -5,9 +5,7 @@ import sibarum.dasum.gui.core.component.Component;
 import sibarum.dasum.gui.core.component.DynamicChildren;
 import sibarum.dasum.gui.core.render.Color;
 import sibarum.ternion.app.AppContext;
-import sibarum.ternion.data.CorpusModel;
 import sibarum.ternion.designer.GraphSync;
-import sibarum.ternion.designer.Palette;
 
 import java.util.List;
 
@@ -25,16 +23,14 @@ final class LossChartTest {
 
     @Test
     void chartBuildsAndUpdatesWithSamples() {
-        // Minimal AppContext — a NUMBER Terminal so the controller's
-        // initial findTerminal returns something (not strictly needed for
-        // the chart but keeps the controller's nextExample sane).
+        // The chart consumes LossHistory directly and is independent of
+        // the graph or any iteration path — empty AppContext is enough.
         Component.GraphSurface surface = new Component.GraphSurface(
             null, null, new Color(0f, 0f, 0f, 0f), List.of(), true, 0);
         GraphSync sync = new GraphSync(surface);
         sync.install();
-        sync.spawn(Palette.byKey("output.terminal.number"), 0f, 0f);
 
-        AppContext ctx = new AppContext(surface, sync, new CorpusModel());
+        AppContext ctx = new AppContext(surface, sync);
         TrainingController controller = new TrainingController(ctx);
         ctx.attachTrainingController(controller);
 

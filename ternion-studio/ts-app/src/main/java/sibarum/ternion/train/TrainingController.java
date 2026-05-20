@@ -4,26 +4,27 @@ import sibarum.dasum.gui.core.reactive.Property;
 import sibarum.mcc.graph.CompGraphNode;
 import sibarum.mcc.graph.ComputationGraph;
 import sibarum.mcc.graph.SlotSource;
-import sibarum.mcc.op.Terminal;
 import sibarum.mcc.primitive.Differentiable;
 import sibarum.mcc.primitive.Parameterized;
 import sibarum.mcc.primitive.Primitive;
 import sibarum.mcc.primitive.Trainable;
-import sibarum.mcc.training.Corpus;
-import sibarum.mcc.training.Example;
 import sibarum.mcc.value.MatrixValue;
 import sibarum.mcc.value.NumberValue;
 import sibarum.mcc.value.Value;
 import sibarum.ternion.app.AppContext;
+import sibarum.ternion.data.source.DataSource;
+import sibarum.ternion.data.source.DataSourceRegistry;
+import sibarum.ternion.designer.DataSourceBoundNodes;
+import sibarum.ternion.designer.DatasetColumnPrimitive;
 import sibarum.ternion.designer.FrozenNodes;
-import sibarum.ternion.designer.NodeSpec;
+import sibarum.ternion.designer.LossOutputPrimitive;
+import sibarum.ternion.designer.VisualizerNodes;
 
-import java.util.HashMap;
 import java.util.IdentityHashMap;
-import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.locks.Condition;
 import java.util.concurrent.locks.ReentrantLock;
 
@@ -96,12 +97,15 @@ public final class TrainingController {
 
     // ----- training scratch state (worker-thread only) -----
     private final IdentityHashMap<Object, Trainable> pendingSteps = new IdentityHashMap<>();
-    private Iterator<Example> currentIterator;
-    private Corpus currentCorpus;
     /** Nodes from the most recent successful example's graph snapshot. Used
      *  by {@link #applyPendingSteps} to freeze participants at epoch end
      *  in accumulate mode (where the graph isn't otherwise reachable). */
     private List<CompGraphNode> lastParticipants = List.of();
+    /** Single source id the trainer iterates. Cached at bootstrap from
+     *  the {@link LossOutputPrimitive}'s binding. */
+    private String lossOutputSourceId = null;
+    /** Position into the source's rows. */
+    private int lossOutputRowIdx = 0;
 
     public TrainingController(AppContext ctx) {
         this.ctx = ctx;
@@ -127,35 +131,52 @@ public final class TrainingController {
         try {
             if (state.get() == TrainingState.RUNNING) return;
             if (state.get() != TrainingState.IDLE && state.get() != TrainingState.STOPPED) return;
-            // Reset publish-throttle accumulators on each start so a new
-            // run begins with fresh counters/timestamps.
-            lastUiPublishNs = 0L;
-            internalExample = 0L;
-            internalEpoch   = 0L;
-            uiPublishPending = false;
-
-            // Pre-flight: surface obvious misconfigurations before spinning
-            // up the worker thread. Saves the user from staring at an
-            // unchanging UI while the loop discovers the same problem.
-            String preflight = validateBeforeStart();
-            if (preflight != null) {
-                lastError.set(preflight);
-                sibarum.dasum.gui.core.status.Status.error("Training can't start: " + preflight);
-                return;
-            }
-
-            lastError.set("");
-            pendingSteps.clear();
-            currentIterator = null;
-            currentCorpus = ctx.corpus().toCorpus();
-            atRest.set(false);
-            state.set(TrainingState.RUNNING);
-            worker = new Thread(this::workerLoop, "ts-train-worker");
-            worker.setDaemon(true);
-            worker.start();
+            if (!preflightOrError("Training can't start")) return;
+            bootstrapWorker(TrainingState.RUNNING);
         } finally {
             lock.unlock();
         }
+    }
+
+    /**
+     * Spin up the worker thread in {@code initialState}, after the lock-held
+     * caller has already preflighted. Resets publish counters and corpus
+     * iterator so a new run begins cleanly. Shared by {@link #start} (which
+     * launches RUNNING) and {@link #step} (which launches PAUSED with
+     * {@code stepPending=true} for a one-shot advance from IDLE/STOPPED).
+     *
+     * <p>Caller must hold {@link #lock}.
+     */
+    private void bootstrapWorker(TrainingState initialState) {
+        lastUiPublishNs = 0L;
+        internalExample = 0L;
+        internalEpoch   = 0L;
+        uiPublishPending = false;
+        lastError.set("");
+        pendingSteps.clear();
+        lossOutputRowIdx = 0;
+        Set<String> srcs = DataSourceBoundNodes.distinctSources();
+        this.lossOutputSourceId = srcs.isEmpty() ? null : srcs.iterator().next();
+        atRest.set(false);
+        state.set(initialState);
+        worker = new Thread(this::workerLoop, "ts-train-worker");
+        worker.setDaemon(true);
+        worker.start();
+    }
+
+    /**
+     * Run the preflight check; on failure, set {@link #lastError} + show a
+     * Status toast prefixed with {@code prefix} and return {@code false}.
+     * Caller already holds {@link #lock}.
+     */
+    private boolean preflightOrError(String prefix) {
+        String preflight = validateBeforeStart();
+        if (preflight != null) {
+            lastError.set(preflight);
+            sibarum.dasum.gui.core.status.Status.error(prefix + ": " + preflight);
+            return false;
+        }
+        return true;
     }
 
     /**
@@ -164,38 +185,50 @@ public final class TrainingController {
      * human-readable description of the first problem found.
      */
     private String validateBeforeStart() {
-        CompGraphNode terminal = null;
-        for (NodeSpec spec : ctx.graphSync().liveNodes()) {
-            if (spec.tNode().primitive() instanceof Terminal) {
-                terminal = spec.cgNode();
-                break;
-            }
+        CompGraphNode lossSink = DataSourceBoundNodes.findLossTarget();
+        if (lossSink == null) {
+            return "no Loss Output node in the graph — spawn one and wire its "
+                + "'predicted' input to your model's output";
         }
-        if (terminal == null) {
-            return "no Terminal node in the graph";
+        return validateLossOutputPath(lossSink);
+    }
+
+    /**
+     * Preflight for the LossOutput-driven iteration path. Validates
+     * exactly one source is referenced, that source has rows, the loss
+     * sink itself is wired, and every non-{@link DatasetColumnPrimitive}
+     * input slot in the snapshot rooted at {@code lossSink} has a source.
+     */
+    private String validateLossOutputPath(CompGraphNode lossSink) {
+        Set<String> srcs = DataSourceBoundNodes.distinctSources();
+        if (srcs.isEmpty()) {
+            return "Loss Output has no source binding — pick a source + column in its Properties.";
         }
-        // Probe a fresh corpus snapshot. Empty corpus is fine for paused
-        // exploration but useless for training — surface the warning so
-        // the user knows nothing will happen.
-        Corpus corpus = ctx.corpus().toCorpus();
-        if (corpus.size() == 0) {
-            return "no examples in the corpus — populate the Data tab first";
+        if (srcs.size() > 1) {
+            return "graph references " + srcs.size() + " distinct sources " + srcs
+                + "; V1 supports exactly one — wire all Dataset Column + Loss Output nodes to the same source.";
         }
-        // Verify the graph topology can execute: every non-wired slot
-        // must be a corpus root binding. We snapshot the graph and walk
-        // each node's slot list.
-        ComputationGraph snapshot = ctx.graphSync().snapshot(terminal);
-        java.util.Set<String> rootKeys = new java.util.HashSet<>();
-        Iterator<Example> it = corpus.stream();
-        if (it.hasNext()) rootKeys.addAll(it.next().inputs().keySet());
+        String sourceId = srcs.iterator().next();
+        DataSourceRegistry reg = DataSourceRegistry.current();
+        DataSource src = reg == null ? null : reg.byId(sourceId);
+        if (src == null) {
+            return "Loss Output references unknown source '" + sourceId + "'";
+        }
+        if (src.rowCount() == 0) {
+            return "source '" + sourceId + "' has no rows — add some via the Data tab first.";
+        }
+        // Loss sink itself must have its predicted slot wired.
+        if (lossSink.slotCount() < 1 || lossSink.slot(0) == null) {
+            return "Loss Output's 'predicted' slot is unwired — wire the model output into it.";
+        }
+        // Every non-DatasetColumn input slot in the snapshot must be wired.
+        ComputationGraph snapshot = ctx.graphSync().snapshot(lossSink);
         for (CompGraphNode n : snapshot.nodes()) {
+            if (n.tNode().primitive() instanceof DatasetColumnPrimitive) continue;
             for (int i = 0; i < n.slotCount(); i++) {
                 if (n.slot(i) != null) continue;
-                String key = n.id() + "#" + i;
-                if (!rootKeys.contains(key)) {
-                    return "slot " + i + " of '" + n.id() + "' is unwired"
-                        + " and has no matching corpus input (key '" + key + "')";
-                }
+                return "slot " + i + " of '" + n.id() + "' is unwired"
+                    + " — wire it to a Dataset Column or another node";
             }
         }
         return null;
@@ -224,12 +257,35 @@ public final class TrainingController {
         }
     }
 
+    /**
+     * Advance training by exactly one example, regardless of current
+     * state:
+     * <ul>
+     *   <li>IDLE / STOPPED — preflight, then bootstrap the worker in
+     *       {@link TrainingState#PAUSED} with {@code stepPending=true} so
+     *       the worker runs one example immediately and then awaits.</li>
+     *   <li>PAUSED — signal {@code stepPending} and wake the worker.</li>
+     *   <li>RUNNING — no-op (the worker is already advancing on its own;
+     *       click Pause first if you want single-step control).</li>
+     * </ul>
+     */
     public void step() {
         lock.lock();
         try {
-            if (state.get() == TrainingState.PAUSED) {
-                stepPending = true;
-                wakeup.signalAll();
+            TrainingState s = state.get();
+            switch (s) {
+                case IDLE, STOPPED -> {
+                    if (!preflightOrError("Step")) return;
+                    stepPending = true;
+                    bootstrapWorker(TrainingState.PAUSED);
+                }
+                case PAUSED -> {
+                    stepPending = true;
+                    wakeup.signalAll();
+                }
+                case RUNNING -> {
+                    // Intentional no-op — already running.
+                }
             }
         } finally {
             lock.unlock();
@@ -291,15 +347,9 @@ public final class TrainingController {
 
                 // Run one example outside the lock so pause() can grab the
                 // lock in parallel; the next iteration sees the new state.
-                Example ex = nextExample();
-                if (ex == null) {
-                    // No data — sleep briefly and re-check (the user may
-                    // be adding rows in the Data tab).
-                    sleep(100);
-                    continue;
-                }
+                boolean advanced;
                 try {
-                    runOneExample(ex);
+                    advanced = runOneLossOutputStep();
                 } catch (RuntimeException e) {
                     maybePublishUi(true);  // flush before reporting
                     String msg = failureMessage(e);
@@ -309,6 +359,10 @@ public final class TrainingController {
                     state.set(TrainingState.STOPPED);
                     atRest.set(true);
                     return;
+                }
+                if (!advanced) {
+                    sleep(100);
+                    continue;
                 }
 
                 if (wasStep) {
@@ -322,59 +376,50 @@ public final class TrainingController {
         }
     }
 
-    /** Pull the next example from the active corpus iterator, rolling
-     *  over to a fresh iterator (next epoch) at end-of-stream. Returns
-     *  {@code null} if the corpus is empty. */
-    private Example nextExample() {
-        if (currentCorpus == null) return null;
-        if (currentIterator == null || !currentIterator.hasNext()) {
-            if (currentIterator != null) {
-                // End of epoch — drain pending steps if accumulating.
-                if (!stepEveryExample.get()) applyPendingSteps();
-                internalEpoch++;
-                uiPublishPending = true;
-            }
-            // Refresh the corpus snapshot — the user may have edited
-            // rows since the last epoch.
-            currentCorpus = ctx.corpus().toCorpus();
-            if (currentCorpus.size() == 0) return null;
-            currentIterator = currentCorpus.stream();
-            internalExample = 0L;
+    /**
+     * Phase C-1 iteration step: advance every {@code SourceBound}
+     * binding to the next row, snapshot the graph rooted at the Loss
+     * Output sink, run forward, and backprop with the trivial
+     * {@code dL/dL=1} seed at the sink (since the sink's
+     * {@code producedValue} is the scalar loss).
+     *
+     * <p>Returns {@code false} only if the active source has zero rows,
+     * which lets the worker sleep + retry rather than busy-loop while
+     * the user is mid-edit on the Data tab.
+     */
+    private boolean runOneLossOutputStep() {
+        CompGraphNode lossSink = DataSourceBoundNodes.findLossTarget();
+        if (lossSink == null) return false;
+        DataSource src = DataSourceRegistry.current().byId(lossOutputSourceId);
+        if (src == null) return false;
+        int total = src.rowCount();
+        if (total <= 0) return false;
+        if (lossOutputRowIdx >= total) {
+            if (!stepEveryExample.get()) applyPendingSteps();
+            internalEpoch++;
             uiPublishPending = true;
+            lossOutputRowIdx = 0;
         }
-        if (!currentIterator.hasNext()) return null;
-        return currentIterator.next();
-    }
-
-    private void runOneExample(Example ex) {
-        ComputationGraph graph = snapshotGraph();
-        if (graph == null) {
-            throw new IllegalStateException("graph has no Terminal node — add one in the Designer");
-        }
-        Map<String, CompGraphNode> byId = idMap(graph);
-
-        // Bind named inputs to graph roots.
-        for (Map.Entry<String, Value> e : ex.inputs().entrySet()) {
-            String key = e.getKey();
-            int hash = key.lastIndexOf('#');
-            if (hash < 0) continue;
-            String nodeId = key.substring(0, hash);
-            int slot;
-            try { slot = Integer.parseInt(key.substring(hash + 1)); }
-            catch (NumberFormatException nfe) { continue; }
-            CompGraphNode n = byId.get(nodeId);
-            if (n == null) continue;
-            graph.bindRoot(n, slot, e.getValue());
+        int row = lossOutputRowIdx++;
+        for (DataSourceBoundNodes.Binding b : DataSourceBoundNodes.all()) {
+            b.primitive().setCurrentRow(row);
         }
 
-        Value out = graph.execute();
-        double loss = halfMse(out, ex.target());
-        Value terminalGrad = mseGrad(out, ex.target());
+        ComputationGraph graph = ctx.graphSync().snapshot(lossSink);
+        Value out;
+        try {
+            out = graph.execute();
+        } catch (RuntimeException ex) {
+            throw new RuntimeException("forward (row " + row + "): " + ex.getMessage(), ex);
+        }
+        double loss = (out instanceof NumberValue n) ? n.n() : 0.0;
 
-        // Reverse-topo backprop with per-node gradient capture.
+        // Backward: seed dL/dL=1 at the sink. The sink's
+        // {@link LossOutputPrimitive#backward} returns the clipped
+        // (predicted − expected) on the predicted slot which feeds the
+        // standard reverse-topo walk.
         Map<CompGraphNode, Value> grads = new LinkedHashMap<>();
-        grads.put(graph.terminal(), terminalGrad);
-
+        grads.put(graph.terminal(), new NumberValue(1.0));
         List<CompGraphNode> order = graph.topoOrder();
         for (int i = order.size() - 1; i >= 0; i--) {
             CompGraphNode n = order.get(i);
@@ -382,9 +427,12 @@ public final class TrainingController {
             Primitive p = n.tNode().primitive();
             double gradMag = gradAtN == null ? 0.0 : magnitudeOf(gradAtN);
             nodeRuntime.update(n, n.producedValue(), gradMag);
+            VisualizerNodes.Entry vis = VisualizerNodes.of(n);
+            if (vis != null) {
+                VisualizerTap.publish(vis, n.producedValue(), gradAtN);
+            }
             if (gradAtN == null) continue;
             if (!(p instanceof Differentiable diff)) continue;
-
             List<Value> inputGrads;
             try {
                 inputGrads = diff.backward(gradAtN);
@@ -396,12 +444,12 @@ public final class TrainingController {
                 pendingSteps.put(t.trainableIdentity(), t);
             }
             for (int slot = 0; slot < n.slotCount(); slot++) {
-                SlotSource src = n.slot(slot);
-                if (src == null) continue;
+                SlotSource srcSlot = n.slot(slot);
+                if (srcSlot == null) continue;
                 if (slot >= inputGrads.size()) break;
                 Value g = inputGrads.get(slot);
                 if (g == null) continue;
-                accumulate(grads, src.source(), g);
+                accumulate(grads, srcSlot.source(), g);
             }
         }
         nodeRuntime.publish();
@@ -416,6 +464,7 @@ public final class TrainingController {
         internalExample++;
         uiPublishPending = true;
         maybePublishUi(false);
+        return true;
     }
 
     /**
@@ -481,90 +530,6 @@ public final class TrainingController {
     }
 
     // ---------- helpers ----------
-
-    /** Snapshot the GraphSync's live nodes into a fresh ComputationGraph
-     *  rooted at a Terminal node, or {@code null} if no Terminal exists. */
-    private ComputationGraph snapshotGraph() {
-        CompGraphNode terminal = null;
-        for (NodeSpec spec : ctx.graphSync().liveNodes()) {
-            if (spec.tNode().primitive() instanceof Terminal) {
-                terminal = spec.cgNode();
-                break;
-            }
-        }
-        if (terminal == null) return null;
-        return ctx.graphSync().snapshot(terminal);
-    }
-
-    private static Map<String, CompGraphNode> idMap(ComputationGraph g) {
-        Map<String, CompGraphNode> out = new HashMap<>();
-        for (CompGraphNode n : g.nodes()) out.put(n.id(), n);
-        return out;
-    }
-
-    // ----- MSE helpers (mirrors mcc-core/GraphTrainer's private methods) -----
-
-    private static double halfMse(Value out, Value target) {
-        if (out instanceof MatrixValue mo && target instanceof MatrixValue mt) {
-            if (mo.data().length != mt.data().length) {
-                throw new IllegalArgumentException(
-                    "MSE loss: network output is MATRIX[" + mo.data().length
-                        + "] but target is MATRIX[" + mt.data().length
-                        + "] — adjust the target cell length to match.");
-            }
-            double s = 0.0;
-            for (int i = 0; i < mo.data().length; i++) {
-                double d = mo.data()[i] - mt.data()[i];
-                s += d * d;
-            }
-            return 0.5 * s;
-        }
-        if (out instanceof NumberValue no && target instanceof NumberValue nt) {
-            double d = no.n() - nt.n();
-            return 0.5 * d * d;
-        }
-        throw new IllegalArgumentException(
-            "MSE loss: output type " + out.type()
-                + " does not match target type " + target.type()
-                + " — set the Terminal type to match the target column.");
-    }
-
-    /**
-     * Gradient clip threshold for the MSE seed gradient — components of
-     * {@code (output − target)} are clamped to [-CLIP, +CLIP] before the
-     * backward pass begins. Saturates the gradient when the model
-     * overshoots (Huber-loss-like behavior) so a single bad step can't
-     * amplify into runaway weight growth. 1.0 is a conservative default
-     * that lets typical fits converge without divergence.
-     */
-    private static final double GRAD_CLIP = 1.0;
-
-    private static Value mseGrad(Value out, Value target) {
-        if (out instanceof MatrixValue mo && target instanceof MatrixValue mt) {
-            if (mo.data().length != mt.data().length) {
-                throw new IllegalArgumentException(
-                    "MSE gradient: network output is MATRIX[" + mo.data().length
-                        + "] but target is MATRIX[" + mt.data().length + "]");
-            }
-            double[] g = new double[mo.data().length];
-            for (int i = 0; i < g.length; i++) {
-                g[i] = clip(mo.data()[i] - mt.data()[i]);
-            }
-            return new MatrixValue(g);
-        }
-        if (out instanceof NumberValue no && target instanceof NumberValue nt) {
-            return new NumberValue(clip(no.n() - nt.n()));
-        }
-        throw new IllegalArgumentException(
-            "MSE gradient: output type " + out.type()
-                + " does not match target type " + target.type());
-    }
-
-    private static double clip(double v) {
-        if (v >  GRAD_CLIP) return  GRAD_CLIP;
-        if (v < -GRAD_CLIP) return -GRAD_CLIP;
-        return v;
-    }
 
     private static void accumulate(Map<CompGraphNode, Value> grads, CompGraphNode key, Value addend) {
         Value existing = grads.get(key);

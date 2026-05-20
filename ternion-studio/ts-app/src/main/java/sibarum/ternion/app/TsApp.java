@@ -4,6 +4,7 @@ import sibarum.dasum.gui.core.GlfwContext;
 import sibarum.dasum.gui.core.command.CommandRegistry;
 import sibarum.dasum.gui.core.command.EverythingMenu;
 import sibarum.dasum.gui.core.component.Component;
+import sibarum.dasum.gui.core.data.DataTables;
 import sibarum.dasum.gui.core.em.EmContext;
 import sibarum.dasum.gui.core.event.EventLoop;
 import sibarum.dasum.gui.core.event.Invalidator;
@@ -11,6 +12,7 @@ import sibarum.dasum.gui.core.graph.ConnectionSelection;
 import sibarum.dasum.gui.core.input.ConnectionDragController;
 import sibarum.dasum.gui.core.input.ConnectionSelectionController;
 import sibarum.dasum.gui.core.input.ContextMenuController;
+import sibarum.dasum.gui.core.input.DataTableSelectionController;
 import sibarum.dasum.gui.core.input.CursorManager;
 import sibarum.dasum.gui.core.input.FocusState;
 import sibarum.dasum.gui.core.input.GraphSurfaceController;
@@ -30,6 +32,8 @@ import sibarum.dasum.gui.core.layout.LayoutResult;
 import sibarum.dasum.gui.core.layout.PixelRect;
 import sibarum.dasum.gui.core.layout.Render;
 import sibarum.dasum.gui.core.overlay.OverlayStack;
+import sibarum.dasum.gui.core.overlay.TooltipController;
+import sibarum.dasum.gui.core.overlay.TooltipRenderer;
 import sibarum.dasum.gui.core.render.Batcher;
 import sibarum.dasum.gui.core.render.Projection;
 import sibarum.dasum.gui.core.render.RenderStats;
@@ -38,13 +42,17 @@ import sibarum.dasum.gui.core.status.Status;
 import sibarum.dasum.gui.core.text.AtlasData;
 import sibarum.dasum.gui.core.text.FontGroup;
 import sibarum.dasum.gui.core.text.FontGroups;
+import sibarum.dasum.gui.core.text.Icon;
 import sibarum.dasum.gui.core.window.Window;
 import sibarum.dasum.gui.natives.gl.Gl;
 import sibarum.dasum.gui.natives.glfw.Glfw;
 import sibarum.dasum.gui.natives.glfw.GlfwCallbacks;
+import sibarum.dasum.gui.vis.DasumVis;
+import sibarum.dasum.gui.vis.pointcloud.PointCloudController;
 import sibarum.ternion.designer.FrozenBadge;
 import sibarum.ternion.designer.NodePreviewRefresher;
 import sibarum.ternion.train.LossChart;
+import sibarum.ternion.train.TrainStatusRefresher;
 
 import java.util.IdentityHashMap;
 import java.util.Map;
@@ -67,11 +75,16 @@ public final class TsApp {
             Gl.load();
             batcher.init();
             cursors.init();
+            DasumVis.init();
+            DataTables.init();
             EmContext.setDpiScale(window.contentScaleX());
 
-            try (Texture primaryTexture = Texture.fromPngResource("/dasum/atlas/primary.png")) {
+            try (Texture primaryTexture = Texture.fromPngResource("/dasum/atlas/primary.png");
+                 Texture iconsTexture   = Texture.fromPngResource("/dasum/atlas/icons.png")) {
                 AtlasData primaryAtlas = AtlasData.loadFromResource("/dasum/atlas/primary.json");
+                AtlasData iconsAtlas   = AtlasData.loadFromResource("/dasum/atlas/icons.json");
                 FontGroups.register(FontGroup.of(FontGroups.DEFAULT, primaryAtlas, primaryTexture));
+                FontGroups.register(FontGroup.of(Icon.DEFAULT_FONT_GROUP, iconsAtlas, iconsTexture));
 
                 MainShell.Built built = MainShell.build();
                 Component root = Status.wrap(built.root());
@@ -81,6 +94,20 @@ public final class TsApp {
                     "Ctrl+S: save · Ctrl+O: open · Ctrl+N: new · Space: pause/resume training · Ctrl+Space: commands");
                 wireInput(window, cursors, ctx);
                 registerCommands(window, ctx);
+
+                // Veto the X-button close when the project is dirty.
+                // GLFW flips windowShouldClose AFTER the callback
+                // returns; resetting it to false inside the listener
+                // keeps the window open while the dialog runs. If the
+                // project is clean we let the close go through —
+                // setting shouldClose=true is redundant but explicit.
+                sibarum.dasum.gui.natives.glfw.GlfwCallbacks.setWindowCloseListener(win -> {
+                    if (win != window.handle().address()) return;
+                    if (ctx.project().dirty().get()) {
+                        sibarum.dasum.gui.natives.glfw.Glfw.glfwSetWindowShouldClose(window.handle(), false);
+                        MainShell.requestClose(ctx);
+                    }
+                });
 
                 RenderStats stats = new RenderStats();
                 System.out.println("Ternion Studio — Designer / Data / Train. Ctrl+Space for commands; Ctrl+=/- zoom.");
@@ -94,6 +121,7 @@ public final class TsApp {
                     FrozenBadge.refresh(ctx.graphSync());
                     LossChart.refreshAll();
                     NodePreviewRefresher.refresh();
+                    TrainStatusRefresher.refresh();
 
                     int fbW = window.framebufferWidth();
                     int fbH = window.framebufferHeight();
@@ -109,6 +137,13 @@ public final class TsApp {
                     OverlayStack.layoutInto(mergedRects, viewport);
                     LayoutResult layout = new LayoutResult(mergedRects);
                     LatestLayout.store(root, layout);
+
+                    // Re-evaluate tooltip anchor against the freshest layout
+                    // and the current cursor position — covers the silent-
+                    // UI-rebuild case where the component under a stationary
+                    // cursor changed without a cursor-move firing.
+                    TooltipController.resolveBeforeRender(
+                        layout, root, InputState.mouseX(), InputState.mouseY());
 
                     batcher.beginFrame(fbH);
                     Render.render(root, layout, batcher, projection);
@@ -126,6 +161,12 @@ public final class TsApp {
                             batcher.flush(projection);
                         }
                     }
+                    // Tooltip rides above everything (including modal overlays)
+                    // so a tooltip-anchored button inside a modal still surfaces
+                    // its text. Flush first so the batcher's accumulated state
+                    // commits cleanly before the overlay text submits.
+                    batcher.flush(projection);
+                    TooltipRenderer.render(batcher, projection, viewport);
                     batcher.endFrame(projection);
 
                     stats.recordFrame(batcher.drawCallsThisFrame(), batcher.verticesThisFrame());
@@ -140,6 +181,15 @@ public final class TsApp {
 
     private static void wireInput(Window window, CursorManager cursors, AppContext ctx) {
         GlfwCallbacks.setKeyListener((win, key, scancode, action, mods) -> {
+            // Track modifier state so TextInputController.onCharInput
+            // can reject spurious char events from Ctrl-chord keypresses
+            // (e.g. Ctrl+Space → opens menu BUT also fires a space char
+            // event that would otherwise insert a leading space into
+            // the freshly-focused query input).
+            InputState.setMods(mods);
+            // Tooltip's modifier-keyed triggers re-evaluate on every modifier
+            // transition (held / released). Cheap; just compares cached bits.
+            TooltipController.onModsChanged(mods);
             if (action != Glfw.GLFW_PRESS && action != Glfw.GLFW_REPEAT) return;
             boolean ctrl  = (mods & Glfw.GLFW_MOD_CONTROL) != 0;
             boolean shift = (mods & Glfw.GLFW_MOD_SHIFT)   != 0;
@@ -194,6 +244,7 @@ public final class TsApp {
             if (key == Glfw.GLFW_KEY_TAB && TextInputController.onTab()) return;
 
             if (TextInputController.onKey(key, shift, ctrl)) return;
+            if (DataTableSelectionController.onKey(key, mods, window.handle())) return;
             if (SliderController.onKey(key)) return;
             if (TabsController.onKey(key))   return;
 
@@ -211,8 +262,7 @@ public final class TsApp {
                 } else if (focused != null) {
                     FocusState.clear();
                 } else {
-                    Glfw.glfwSetWindowShouldClose(window.handle(), true);
-                    Invalidator.invalidate();
+                    MainShell.requestClose(ctx);
                 }
             } else if (key == Glfw.GLFW_KEY_TAB) {
                 Component layoutRoot = OverlayStack.activeInputRoot(LatestLayout.root());
@@ -228,12 +278,17 @@ public final class TsApp {
 
         GlfwCallbacks.setCursorPosListener((win, x, y) -> {
             InputState.updateMousePos(x, y);
+            TooltipController.onCursorMove(x, y);
             ScrollbarController.onCursorMove(x, y);
             if (ScrollbarController.isDragging()) return;
             ConnectionDragController.onCursorMove(x, y);
             if (ConnectionDragController.isDragging()) return;
             GraphSurfaceController.onCursorMove(x, y);
             if (GraphSurfaceController.isDragging()) return;
+            PointCloudController.onCursorMove(x, y);
+            if (PointCloudController.isDragging()) return;
+            DataTableSelectionController.onCursorMove(x, y);
+            if (DataTableSelectionController.isDragging()) return;
             ContextMenuController.onCursorMove(x, y);
 
             LayoutResult lr = LatestLayout.result();
@@ -251,6 +306,7 @@ public final class TsApp {
         });
 
         GlfwCallbacks.setMouseButtonListener((win, button, action, mods) -> {
+            InputState.setMods(mods);
             if (button == Glfw.GLFW_MOUSE_BUTTON_RIGHT) {
                 if (action == Glfw.GLFW_PRESS) {
                     ContextMenuController.onMouseDown(
@@ -274,6 +330,14 @@ public final class TsApp {
                     pressTarget = null; return;
                 }
                 if (GraphSurfaceController.onMouseDown(InputState.mouseX(), InputState.mouseY())) {
+                    pressTarget = null; return;
+                }
+                if (PointCloudController.onMouseDown(HoverState.hovered(), InputState.mouseX(), InputState.mouseY())) {
+                    pressTarget = null;
+                    FocusState.set(HoverState.hovered());
+                    return;
+                }
+                if (DataTableSelectionController.onMouseDown(InputState.mouseX(), InputState.mouseY(), shift)) {
                     pressTarget = null; return;
                 }
                 if (ConnectionSelectionController.onMouseDown(InputState.mouseX(), InputState.mouseY())) {
@@ -316,24 +380,34 @@ public final class TsApp {
                 boolean sliderDrag = SliderController.isDragging();
                 boolean canvasDrag = GraphSurfaceController.isDragging();
                 boolean connectionDrag = ConnectionDragController.isDragging();
+                boolean pointCloudDrag = PointCloudController.isDragging();
+                boolean dataTableDrag = DataTableSelectionController.isDragging();
                 ScrollbarController.onMouseUp();
                 SliderController.onMouseUp();
                 GraphSurfaceController.onMouseUp();
                 ConnectionDragController.onMouseUp();
+                PointCloudController.onMouseUp();
+                DataTableSelectionController.onMouseUp();
 
                 LayoutResult lr2 = LatestLayout.result();
                 Component dispatchRoot = OverlayStack.activeInputRoot(LatestLayout.root());
                 Component released = (lr2 != null && dispatchRoot != null)
                     ? HitTest.test(dispatchRoot, lr2, (float) InputState.mouseX(), (float) InputState.mouseY())
                     : null;
-                if (!scrollDrag && !sliderDrag && !canvasDrag && !connectionDrag && pressTarget != null && released == pressTarget) {
+                if (!scrollDrag && !sliderDrag && !canvasDrag && !connectionDrag && !pointCloudDrag && !dataTableDrag && pressTarget != null && released == pressTarget) {
                     Handlers.activate(pressTarget, dispatchRoot);
                 }
                 pressTarget = null;
             }
         });
 
-        GlfwCallbacks.setCharListener((win, codepoint) -> TextInputController.onCharInput(codepoint));
+        GlfwCallbacks.setCharListener((win, codepoint) -> {
+            // DataTable inline-edit + Excel-style "start typing to edit" takes
+            // precedence when a table owns focus; falls through to the regular
+            // text-input controller otherwise.
+            if (DataTableSelectionController.onCharInput(codepoint)) return;
+            TextInputController.onCharInput(codepoint);
+        });
 
         GlfwCallbacks.setCursorEnterListener((win, entered) -> {
             if (!entered) {
@@ -341,6 +415,7 @@ public final class TsApp {
                 TextStates.clearAllHoverCarets();
                 ScrollbarController.clearHover();
                 TabsController.clearHover();
+                TooltipController.hideAll();
                 cursors.setShape(CursorManager.CursorShape.ARROW);
                 Invalidator.invalidate();
             }
@@ -352,8 +427,11 @@ public final class TsApp {
                 ScrollbarController.cancelDrag();
                 GraphSurfaceController.cancelDrag();
                 ConnectionDragController.cancelDrag();
+                PointCloudController.cancelDrag();
+                DataTableSelectionController.cancelDrag();
                 HoverState.clear();
                 TextStates.clearAllHoverCarets();
+                TooltipController.hideAll();
                 InputState.setLeftButtonHeld(false);
             }
             Invalidator.invalidate();
@@ -363,6 +441,16 @@ public final class TsApp {
             LayoutResult lr = LatestLayout.result();
             Component layoutRoot = OverlayStack.activeInputRoot(LatestLayout.root());
             if (lr == null || layoutRoot == null) return;
+            // Point-cloud viewport gets first refusal — scroll over a viewport
+            // zooms its camera rather than scrolling a container behind it.
+            Component pcHit = HitTest.test(layoutRoot, lr, (float) InputState.mouseX(), (float) InputState.mouseY());
+            if (PointCloudController.onScroll(pcHit, yOff)) return;
+            // DataTable owns scroll over its own area before any wrapping Scroll
+            // container gets the event.
+            if (DataTableSelectionController.onScroll(
+                    InputState.mouseX(), InputState.mouseY(), xOff, yOff, InputState.shiftHeld())) {
+                return;
+            }
             Component.Scroll target = HitTest.findScroll(layoutRoot, lr, (float) InputState.mouseX(), (float) InputState.mouseY());
             if (target == null) return;
 
@@ -385,10 +473,9 @@ public final class TsApp {
         CommandRegistry.register("project.save", "Project: Save…",   () -> MainShell.triggerSave(ctx));
         CommandRegistry.register("train.toggle", "Training: Toggle pause/resume",
             () -> toggleTrainingPause(ctx));
-        CommandRegistry.register("quit",        "Quit",            () -> {
-            Glfw.glfwSetWindowShouldClose(window.handle(), true);
-            Invalidator.invalidate();
-        });
+        CommandRegistry.register("demo.visualizer", "Demo: Visualizer scenario (Parameter → Visualizer → Terminal)",
+            () -> DemoFixtures.installVisualizerDemo(ctx));
+        CommandRegistry.register("quit",        "Quit",            () -> MainShell.requestClose(ctx));
     }
 
     /**

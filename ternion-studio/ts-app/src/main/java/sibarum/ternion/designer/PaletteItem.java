@@ -38,7 +38,7 @@ import java.util.function.Function;
 public final class PaletteItem {
 
     /** Visual / palette grouping. Cosmetic only. */
-    public enum Category { INPUT, OUTPUT, ARITHMETIC, ACTIVATION, LINEAR, RESHAPE, GEOMETRY, CONVERSION, EMBEDDING }
+    public enum Category { INPUT, OUTPUT, ARITHMETIC, ACTIVATION, LINEAR, RESHAPE, GEOMETRY, CONVERSION, EMBEDDING, VISUALIZER }
 
     private final String key;
     private final String label;
@@ -68,6 +68,20 @@ public final class PaletteItem {
     public Category category()                { return category; }
     public List<ConfigField> configSchema()   { return configSchema; }
 
+    /**
+     * Run the primitive factory against {@code config} without
+     * touching the dasum surface or any sidecars — used by
+     * {@link GraphSync#replaceConfig} as a pre-flight so a bad config
+     * doesn't unwind mid-mutation and leave the graph in a partial
+     * state (old node removed, new node never constructed). Any
+     * factory throw propagates verbatim.
+     */
+    public sibarum.mcc.primitive.Primitive tryCreatePrimitive(Map<String, Object> config) {
+        Map<String, Object> resolved = new java.util.LinkedHashMap<>(ConfigField.defaultsOf(configSchema));
+        if (config != null) resolved.putAll(config);
+        return primitiveFactory.apply(resolved);
+    }
+
     /** Spawn with the given config map. Use {@link ConfigField#defaultsOf}
      *  for the all-defaults case. Missing schema keys are backfilled from
      *  defaults so the factory and serialization always see a complete map. */
@@ -95,14 +109,19 @@ public final class PaletteItem {
         Map<Component, PortBinding> bindings = new IdentityHashMap<>();
         List<Component> orderedInputs = new ArrayList<>(inputLabels.size());
 
+        OptionalInt inDim  = PortDimResolver.inputDimOf(key, resolved);
+        OptionalInt outDim = PortDimResolver.outputDimOf(key, resolved);
+
         for (int i = 0; i < inputLabels.size(); i++) {
             Ports.Port p = Ports.byName(visual, inputLabels.get(i));
             if (p == null) {
                 throw new IllegalStateException("Port not found post-build: " + inputLabels.get(i));
             }
+            ValueType t = primitive.inputTypes().get(i);
             orderedInputs.add(p.component());
-            bindings.put(p.component(),
-                new PortBinding(cgNode, i, primitive.inputTypes().get(i)));
+            bindings.put(p.component(), new PortBinding(cgNode, i, t));
+            sibarum.dasum.gui.core.overlay.Tooltips.set(p.component(),
+                formatPortTooltip("Input", inputLabels.get(i), t, inDim));
         }
         Component outputComp = null;
         if (outputLabel != null) {
@@ -111,8 +130,11 @@ public final class PaletteItem {
                 throw new IllegalStateException("Output port not found: " + outputLabel);
             }
             outputComp = p.component();
+            ValueType t = primitive.outputType();
             bindings.put(outputComp,
-                new PortBinding(cgNode, PortBinding.OUTPUT_SLOT, primitive.outputType()));
+                new PortBinding(cgNode, PortBinding.OUTPUT_SLOT, t));
+            sibarum.dasum.gui.core.overlay.Tooltips.set(outputComp,
+                formatPortTooltip("Output", outputLabel, t, outDim));
         }
 
         // Inline dim summary, shown only for primitives whose shape is
@@ -146,6 +168,24 @@ public final class PaletteItem {
     private static final Color PREVIEW_FG  = new Color(0.78f, 0.84f, 0.92f, 0.9f);
     private static final Color PREVIEW_BG  = new Color(0f, 0f, 0f, 0.18f);
     private static final Color DIM_HINT_FG = new Color(0.65f, 0.85f, 0.75f, 0.9f);
+
+    /**
+     * Compose a port tooltip — surfaces the port's role, name, and
+     * shape. Examples:
+     * <pre>
+     *   Input · x · MATRIX[4]
+     *   Output · result · NUMBER
+     *   Input · text · STRING
+     * </pre>
+     * The dim suffix is omitted when {@link PortDimResolver} can't read
+     * it from {@code (paletteKey, config)} alone — those ports get a
+     * tooltip without the {@code [N]} suffix until the value flows.
+     */
+    private static String formatPortTooltip(String direction, String label,
+                                            ValueType type, OptionalInt dim) {
+        String shape = type.name() + (dim.isPresent() ? "[" + dim.getAsInt() + "]" : "");
+        return direction + " · " + label + " · " + shape;
+    }
 
     private static String formatDimHint(String paletteKey, Map<String, Object> cfg) {
         OptionalInt in  = PortDimResolver.inputDimOf(paletteKey, cfg);
