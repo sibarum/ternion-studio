@@ -155,7 +155,7 @@ public final class TrainingController {
         lastError.set("");
         pendingSteps.clear();
         lossOutputRowIdx = 0;
-        Set<String> srcs = DataSourceBoundNodes.distinctSources();
+        Set<String> srcs = DataSourceBoundNodes.distinctIteratedSources();
         this.lossOutputSourceId = srcs.isEmpty() ? null : srcs.iterator().next();
         atRest.set(false);
         state.set(initialState);
@@ -200,13 +200,18 @@ public final class TrainingController {
      * input slot in the snapshot rooted at {@code lossSink} has a source.
      */
     private String validateLossOutputPath(CompGraphNode lossSink) {
-        Set<String> srcs = DataSourceBoundNodes.distinctSources();
+        // Only iterated bindings (DatasetColumn + LossOutput) count
+        // toward the single-source rule. Lookup Columns are
+        // random-access — the graph can reference any number of them
+        // against any sources alongside the iterated source.
+        Set<String> srcs = DataSourceBoundNodes.distinctIteratedSources();
         if (srcs.isEmpty()) {
             return "Loss Output has no source binding — pick a source + column in its Properties.";
         }
         if (srcs.size() > 1) {
-            return "graph references " + srcs.size() + " distinct sources " + srcs
-                + "; V1 supports exactly one — wire all Dataset Column + Loss Output nodes to the same source.";
+            return "graph references " + srcs.size() + " distinct iterated sources " + srcs
+                + "; V1 supports exactly one — wire all Dataset Column + Loss Output nodes to the same source"
+                + " (Lookup Column nodes don't count and can use any source).";
         }
         String sourceId = srcs.iterator().next();
         DataSourceRegistry reg = DataSourceRegistry.current();
@@ -401,8 +406,12 @@ public final class TrainingController {
             lossOutputRowIdx = 0;
         }
         int row = lossOutputRowIdx++;
+        // Only iterated bindings (INPUT + LOSS_TARGET) get the row
+        // pointer. Lookup bindings are random-access by key and
+        // would no-op here anyway, but filtering up front keeps the
+        // contract explicit.
         for (DataSourceBoundNodes.Binding b : DataSourceBoundNodes.all()) {
-            b.primitive().setCurrentRow(row);
+            if (b.primitive().iterated()) b.primitive().setCurrentRow(row);
         }
 
         ComputationGraph graph = ctx.graphSync().snapshot(lossSink);

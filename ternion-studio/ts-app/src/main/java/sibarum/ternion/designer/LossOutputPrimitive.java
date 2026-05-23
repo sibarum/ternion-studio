@@ -8,6 +8,7 @@ import sibarum.mcc.value.MatrixValue;
 import sibarum.mcc.value.NumberValue;
 import sibarum.mcc.value.Value;
 import sibarum.mcc.value.ValueType;
+import sibarum.ternion.data.source.Cells;
 import sibarum.ternion.data.source.DataSource;
 import sibarum.ternion.data.source.DataSourceRegistry;
 
@@ -209,7 +210,7 @@ public final class LossOutputPrimitive
         String cell = source.get(currentRow, columnIndex);
         Value expected = (lossFn == LossFn.CATEGORICAL)
             ? oneHotFor(cell, predicted)
-            : parseCell(cell, inputType);
+            : Cells.parse(inputType, cell);
         this.lastPredicted = predicted;
         this.lastExpected  = expected;
         return new NumberValue(halfMse(predicted, expected));
@@ -328,31 +329,4 @@ public final class LossOutputPrimitive
             "Loss Output backward expected a scalar gradOutput; got " + v.type());
     }
 
-    private static Value parseCell(String cell, ValueType type) {
-        if (cell == null) cell = "";
-        return switch (type) {
-            case NUMBER -> new NumberValue(
-                cell.isBlank() ? 0.0 : Double.parseDouble(cell.trim()));
-            case MATRIX -> new MatrixValue(parseFloats(cell));
-            default -> throw new IllegalArgumentException(
-                "Loss Output doesn't yet support inputType " + type
-                + " (V1 supports NUMBER and MATRIX)");
-        };
-    }
-
-    private static double[] parseFloats(String raw) {
-        if (raw == null) return new double[0];
-        String s = raw.trim();
-        if (s.isEmpty()) return new double[0];
-        if ((s.startsWith("[") && s.endsWith("]"))
-            || (s.startsWith("(") && s.endsWith(")"))
-            || (s.startsWith("{") && s.endsWith("}"))) {
-            s = s.substring(1, s.length() - 1).trim();
-            if (s.isEmpty()) return new double[0];
-        }
-        String[] parts = s.split("[\\s,]+");
-        double[] out = new double[parts.length];
-        for (int i = 0; i < parts.length; i++) out[i] = Double.parseDouble(parts[i]);
-        return out;
-    }
 }

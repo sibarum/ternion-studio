@@ -1,5 +1,7 @@
 package sibarum.ternion.data.curated;
 
+import sibarum.mcc.value.ValueType;
+
 import java.io.BufferedReader;
 import java.io.IOException;
 import java.io.InputStream;
@@ -42,7 +44,14 @@ public final class CuratedDatasets {
             "pos_train",
             "POS Tagging · curated train (100/class)",
             "/datasets/pos_train.csv",
-            /*targetColumn=*/ "upos"));
+            /*targetColumn=*/ "upos",
+            Map.of()));   // all columns default to STRING
+        register(loadCsv(
+            "word_embed_k16",
+            "Pretrained word embeddings · K=16",
+            "/datasets/word_embed_k16.csv",
+            /*targetColumn=*/ null,
+            Map.of("embedding", ValueType.MATRIX)));
     }
 
     private CuratedDatasets() {}
@@ -69,7 +78,8 @@ public final class CuratedDatasets {
      * dataset.
      */
     private static CuratedDataset loadCsv(String id, String displayLabel,
-                                          String resourcePath, String targetColumn) {
+                                          String resourcePath, String targetColumn,
+                                          Map<String, ValueType> columnTypeOverrides) {
         try (InputStream in = CuratedDatasets.class.getResourceAsStream(resourcePath)) {
             if (in == null) {
                 throw new IllegalStateException(
@@ -84,11 +94,14 @@ public final class CuratedDatasets {
                         "Curated dataset is empty: " + resourcePath);
                 }
                 List<String> columns = List.of(headerLine.split(",", -1));
-                int targetIdx = columns.indexOf(targetColumn);
-                if (targetIdx < 0 && targetColumn != null) {
-                    throw new IllegalStateException(
-                        "Target column '" + targetColumn + "' not found in "
-                        + resourcePath + "; have " + columns);
+                int targetIdx = -1;
+                if (targetColumn != null) {
+                    targetIdx = columns.indexOf(targetColumn);
+                    if (targetIdx < 0) {
+                        throw new IllegalStateException(
+                            "Target column '" + targetColumn + "' not found in "
+                            + resourcePath + "; have " + columns);
+                    }
                 }
                 List<String[]> rowList = new ArrayList<>();
                 String line;
@@ -99,8 +112,23 @@ public final class CuratedDatasets {
                     rowList.add(cells);
                 }
                 String[][] rows = rowList.toArray(new String[0][]);
+                // Resolve per-column types: overrides win, then default
+                // to STRING. Unknown override names are an error — they
+                // signal a registration bug (typo, stale registration).
+                for (String overrideName : columnTypeOverrides.keySet()) {
+                    if (!columns.contains(overrideName)) {
+                        throw new IllegalStateException(
+                            "columnType override for unknown column '" + overrideName
+                            + "' in " + resourcePath + "; have " + columns);
+                    }
+                }
+                List<ValueType> types = new ArrayList<>(columns.size());
+                for (String col : columns) {
+                    types.add(columnTypeOverrides.getOrDefault(col, ValueType.STRING));
+                }
                 return new CuratedDataset(id, displayLabel,
                     Collections.unmodifiableList(columns),
+                    Collections.unmodifiableList(types),
                     targetIdx, rows);
             }
         } catch (IOException ioe) {

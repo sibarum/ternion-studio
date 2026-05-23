@@ -1,6 +1,7 @@
 package sibarum.ternion.data.source;
 
 import sibarum.dasum.gui.core.reactive.Property;
+import sibarum.mcc.value.ValueType;
 
 import java.util.List;
 
@@ -13,9 +14,12 @@ import java.util.List;
  * about a source's origin.
  *
  * <p>Cells are raw {@link String}; parsing into typed
- * {@link sibarum.mcc.value.Value Value}s happens at the primitive
- * (with its {@code outputType} / {@code inputType} config) so a single
- * source can feed different downstream types from different columns.
+ * {@link sibarum.mcc.value.Value Value}s happens via
+ * {@link Cells#parse} against the column's declared
+ * {@link #columnType(String)}. Primitives can read the type off the
+ * source instead of asking the user to pick one in their config — see
+ * {@link sibarum.ternion.designer.DatasetColumnPrimitive}'s
+ * {@code AUTO} output-type default.
  *
  * <p>{@link #structureVersion()} is bumped whenever rows or columns
  * change shape; the Data tab and any other subscribers re-render off
@@ -48,6 +52,23 @@ public sealed interface DataSource
 
     /** Header row, in column order. */
     List<String> columns();
+
+    /**
+     * Declared cell type for {@code columnName}. Used by primitives
+     * (DatasetColumn, LookupColumn) as the parsing target when the
+     * user picks {@code AUTO} for the primitive's output type — so
+     * a column declared {@code MATRIX} produces a {@code MatrixValue}
+     * without the user re-declaring the same thing in node config.
+     *
+     * <p>Default {@link ValueType#STRING} so legacy sources that
+     * don't know their own types still work — STRING is the
+     * lowest-common-denominator parse target ({@link Cells#parse}
+     * simply wraps the cell in a {@link sibarum.mcc.value.StringValue}).
+     * Implementations override to declare richer types.
+     */
+    default ValueType columnType(String columnName) {
+        return ValueType.STRING;
+    }
 
     /** Total row count. */
     int rowCount();

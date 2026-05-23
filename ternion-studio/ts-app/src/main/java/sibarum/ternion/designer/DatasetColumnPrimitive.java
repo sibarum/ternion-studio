@@ -2,11 +2,9 @@ package sibarum.ternion.designer;
 
 import sibarum.mcc.primitive.Configurable;
 import sibarum.mcc.primitive.Primitive;
-import sibarum.mcc.value.MatrixValue;
-import sibarum.mcc.value.NumberValue;
-import sibarum.mcc.value.StringValue;
 import sibarum.mcc.value.Value;
 import sibarum.mcc.value.ValueType;
+import sibarum.ternion.data.source.Cells;
 import sibarum.ternion.data.source.DataSource;
 import sibarum.ternion.data.source.DataSourceRegistry;
 
@@ -52,7 +50,6 @@ public final class DatasetColumnPrimitive
     public DatasetColumnPrimitive(String sourceId, String columnName, ValueType outputType) {
         if (sourceId == null || sourceId.isBlank()) throw new IllegalArgumentException("sourceId");
         if (columnName == null || columnName.isBlank()) throw new IllegalArgumentException("columnName");
-        if (outputType == null) throw new IllegalArgumentException("outputType");
         DataSourceRegistry reg = DataSourceRegistry.current();
         if (reg == null) {
             throw new IllegalStateException(
@@ -67,9 +64,13 @@ public final class DatasetColumnPrimitive
             throw new IllegalArgumentException("Unknown column '" + columnName
                 + "' in source '" + sourceId + "'; have " + src.columns());
         }
+        // outputType=null means "AUTO — defer to the source's
+        // declared column type". Lets the palette ship an "AUTO"
+        // default without every spawn site re-deriving the type.
+        ValueType resolved = (outputType == null) ? src.columnType(columnName) : outputType;
         this.sourceId   = sourceId;
         this.columnName = columnName;
-        this.outputType = outputType;
+        this.outputType = resolved;
         this.source = src;
         this.columnIndex = idx;
     }
@@ -106,8 +107,7 @@ public final class DatasetColumnPrimitive
 
     @Override
     public Value apply(List<Value> inputs) {
-        String cell = source.get(currentRow, columnIndex);
-        return parse(cell, outputType);
+        return Cells.parse(outputType, source.get(currentRow, columnIndex));
     }
 
     @Override
@@ -116,28 +116,5 @@ public final class DatasetColumnPrimitive
         m.put("source",     sourceId + ":" + columnName);
         m.put("outputType", outputType.name());
         return m;
-    }
-
-    private static Value parse(String cell, ValueType type) {
-        if (cell == null) cell = "";
-        return switch (type) {
-            case STRING -> new StringValue(cell);
-            case NUMBER -> new NumberValue(
-                cell.isBlank() ? 0.0 : Double.parseDouble(cell.trim()));
-            case MATRIX -> new MatrixValue(parseFloats(cell));
-            default -> throw new IllegalArgumentException(
-                "DatasetColumn doesn't yet support " + type
-                + " (supported: STRING, NUMBER, MATRIX)");
-        };
-    }
-
-    private static double[] parseFloats(String raw) {
-        if (raw == null || raw.isBlank()) return new double[0];
-        String[] parts = raw.trim().split("[\\s,]+");
-        double[] out = new double[parts.length];
-        for (int i = 0; i < parts.length; i++) {
-            out[i] = Double.parseDouble(parts[i]);
-        }
-        return out;
     }
 }

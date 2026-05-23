@@ -33,8 +33,11 @@ import sibarum.mcc.value.ValueType;
 import sibarum.ternion.data.curated.CuratedDataset;
 import sibarum.ternion.data.curated.CuratedDatasets;
 import sibarum.ternion.designer.config.ConfigField;
+import sibarum.ternion.data.source.DataSource;
+import sibarum.ternion.data.source.DataSourceRegistry;
 import sibarum.ternion.designer.config.ConfigField.BoolField;
 import sibarum.ternion.designer.config.ConfigField.DoubleField;
+import sibarum.ternion.designer.config.ConfigField.DynamicEnumField;
 import sibarum.ternion.designer.config.ConfigField.EnumField;
 import sibarum.ternion.designer.config.ConfigField.IntField;
 
@@ -84,8 +87,9 @@ public final class Palette {
             "input.dataset.column", "Dataset Column",
             PaletteItem.Category.INPUT, BG_INPUT,
             List.of(
-                new EnumField("source",     "Source",      defaultDatasetSource(), allDatasetSources()),
-                new EnumField("outputType", "Output type", "STRING",               List.of("STRING", "NUMBER", "MATRIX"))
+                new DynamicEnumField("source", "Source",
+                    Palette::defaultDatasetSource, Palette::allDatasetSources),
+                new EnumField("outputType", "Output type", "AUTO",  List.of("AUTO", "STRING", "NUMBER", "MATRIX"))
             ),
             cfg -> {
                 String source = (String) cfg.get("source");
@@ -96,10 +100,37 @@ public final class Palette {
                 }
                 String datasetId  = source.substring(0, colon);
                 String columnName = source.substring(colon + 1);
-                ValueType outputType = ValueType.valueOf((String) cfg.get("outputType"));
+                ValueType outputType = parseOutputType((String) cfg.get("outputType"));
                 return new DatasetColumnPrimitive(datasetId, columnName, outputType);
             },
             "value"));
+
+        // INPUT — Lookup Column. Key-indexed random-access read against
+        // any registered source: STRING input → row whose keyColumn
+        // matches → valueColumn cell parsed as outputType. The natural
+        // use is a bundled embedding table (word_embed_k16:surface →
+        // embedding). Not iterated — pairs with an iterated source
+        // (DatasetColumn / LossOutput) without tripping the trainer's
+        // single-source preflight.
+        list.add(PaletteItem.unary(
+            "input.lookup.column", "Lookup Column",
+            PaletteItem.Category.INPUT, BG_INPUT,
+            List.of(
+                new DynamicEnumField("source", "Source",
+                    Palette::defaultLookupTriple, Palette::allLookupTriples),
+                new EnumField("outputType", "Output type", "AUTO", List.of("AUTO", "STRING", "NUMBER", "MATRIX"))
+            ),
+            cfg -> {
+                String source = (String) cfg.get("source");
+                String[] parts = source.split(":", 3);
+                if (parts.length != 3) {
+                    throw new IllegalArgumentException(
+                        "Lookup Column source must be 'sourceId:keyColumn:valueColumn'; got: " + source);
+                }
+                ValueType outputType = parseOutputType((String) cfg.get("outputType"));
+                return new LookupColumnPrimitive(parts[0], parts[1], parts[2], outputType);
+            },
+            "key", "value"));
 
         // ARITHMETIC.
         list.add(PaletteItem.binary("arith.add",       "Add",       PaletteItem.Category.ARITHMETIC, BG_ARITHMETIC, cfg -> new Add(), "a", "b", "result"));
@@ -167,7 +198,8 @@ public final class Palette {
             "output.loss", "Loss Output",
             PaletteItem.Category.OUTPUT, BG_OUTPUT,
             List.of(
-                new EnumField("source",     "Source",         defaultDatasetSource(), allDatasetSources()),
+                new DynamicEnumField("source", "Source",
+                    Palette::defaultDatasetSource, Palette::allDatasetSources),
                 new EnumField("inputType",  "Predicted type", "MATRIX", List.of("NUMBER", "MATRIX")),
                 new EnumField("lossFn",     "Loss fn",        "MSE",    List.of("MSE", "CATEGORICAL")),
                 new IntField("numClasses",  "Num classes (CATEGORICAL only)", 16, 1, 4096)
@@ -261,14 +293,29 @@ public final class Palette {
         return null;
     }
 
-    /** Every {@code datasetId:columnName} known to {@link CuratedDatasets}.
-     *  Used as the {@code source} EnumField's choice list for the
-     *  Dataset Column palette entry. */
+    /**
+     * Every {@code sourceId:columnName} known to the live
+     * {@link DataSourceRegistry}. Re-queried each time a config
+     * dialog opens (via {@link DynamicEnumField}) so editable +
+     * imported sources registered after JVM startup show up
+     * immediately. Falls back to {@link CuratedDatasets} when the
+     * registry isn't initialised (test paths that build a Palette
+     * without an AppContext).
+     */
     private static List<String> allDatasetSources() {
         List<String> out = new ArrayList<>();
-        for (CuratedDataset ds : CuratedDatasets.all()) {
-            for (String col : ds.columns()) {
-                out.add(ds.id() + ":" + col);
+        DataSourceRegistry reg = DataSourceRegistry.current();
+        if (reg != null) {
+            for (DataSource ds : reg.all()) {
+                for (String col : ds.columns()) {
+                    out.add(ds.id() + ":" + col);
+                }
+            }
+        } else {
+            for (CuratedDataset ds : CuratedDatasets.all()) {
+                for (String col : ds.columns()) {
+                    out.add(ds.id() + ":" + col);
+                }
             }
         }
         if (out.isEmpty()) out.add("none:none");
@@ -276,12 +323,85 @@ public final class Palette {
     }
 
     private static String defaultDatasetSource() {
+        DataSourceRegistry reg = DataSourceRegistry.current();
+        if (reg != null) {
+            for (DataSource ds : reg.all()) {
+                if (!ds.columns().isEmpty()) {
+                    return ds.id() + ":" + ds.columns().get(0);
+                }
+            }
+        }
         for (CuratedDataset ds : CuratedDatasets.all()) {
             if (!ds.columns().isEmpty()) {
                 return ds.id() + ":" + ds.columns().get(0);
             }
         }
         return "none:none";
+    }
+
+    /**
+     * Every {@code sourceId:keyColumn:valueColumn} triple known to the
+     * live {@link DataSourceRegistry}. Re-queried each time the Lookup
+     * Column config dialog opens. Skips pairs where key == value.
+     * Falls back to {@link CuratedDatasets} when the registry isn't
+     * initialised.
+     */
+    private static List<String> allLookupTriples() {
+        List<String> out = new ArrayList<>();
+        DataSourceRegistry reg = DataSourceRegistry.current();
+        if (reg != null) {
+            for (DataSource ds : reg.all()) {
+                List<String> cols = ds.columns();
+                for (String key : cols) {
+                    for (String value : cols) {
+                        if (key.equals(value)) continue;
+                        out.add(ds.id() + ":" + key + ":" + value);
+                    }
+                }
+            }
+        } else {
+            for (CuratedDataset ds : CuratedDatasets.all()) {
+                List<String> cols = ds.columns();
+                for (String key : cols) {
+                    for (String value : cols) {
+                        if (key.equals(value)) continue;
+                        out.add(ds.id() + ":" + key + ":" + value);
+                    }
+                }
+            }
+        }
+        if (out.isEmpty()) out.add("none:none:none");
+        return List.copyOf(out);
+    }
+
+    private static String defaultLookupTriple() {
+        // Prefer surface→embedding (the canonical pretrained-table
+        // shape) when any registered source has it.
+        DataSourceRegistry reg = DataSourceRegistry.current();
+        if (reg != null) {
+            for (DataSource ds : reg.all()) {
+                List<String> cols = ds.columns();
+                if (cols.contains("surface") && cols.contains("embedding")) {
+                    return ds.id() + ":surface:embedding";
+                }
+            }
+        }
+        for (CuratedDataset ds : CuratedDatasets.all()) {
+            List<String> cols = ds.columns();
+            if (cols.contains("surface") && cols.contains("embedding")) {
+                return ds.id() + ":surface:embedding";
+            }
+        }
+        List<String> all = allLookupTriples();
+        return all.isEmpty() ? "none:none:none" : all.get(0);
+    }
+
+    /** {@code "AUTO"} → {@code null} (defer to source's
+     *  {@link sibarum.ternion.data.source.DataSource#columnType
+     *  columnType}); otherwise parse as a {@link ValueType} name. */
+    private static ValueType parseOutputType(String s) {
+        if (s == null || "AUTO".equals(s)) return null;
+        return ValueType.valueOf(s);
     }
 
     private Palette() {}

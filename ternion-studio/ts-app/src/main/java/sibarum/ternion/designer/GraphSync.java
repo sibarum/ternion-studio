@@ -241,15 +241,31 @@ public final class GraphSync {
 
     /**
      * Build a snapshot {@link ComputationGraph} for execution.
-     * {@code terminalNode} must be one of the spawned mcc nodes (typically
-     * a {@code Terminal} primitive). The returned graph is independent
-     * of further edits to the GraphSync.
+     * {@code terminalNode} must be one of the spawned mcc nodes
+     * (typically a {@code LossOutputPrimitive}). The returned graph
+     * only includes nodes reachable backward from {@code terminalNode}
+     * — dangling nodes the user has spawned but not yet wired stay in
+     * the live graph but don't contribute to training. The returned
+     * graph is independent of further edits to the GraphSync.
      */
     public ComputationGraph snapshot(CompGraphNode terminalNode) {
-        List<CompGraphNode> all = new ArrayList<>(nodeOrder.size());
+        // BFS upstream from terminal via slot sources.
+        java.util.Set<CompGraphNode> reachable = new java.util.LinkedHashSet<>();
+        java.util.ArrayDeque<CompGraphNode> stack = new java.util.ArrayDeque<>();
+        stack.push(terminalNode);
+        while (!stack.isEmpty()) {
+            CompGraphNode n = stack.pop();
+            if (!reachable.add(n)) continue;
+            for (int i = 0; i < n.slotCount(); i++) {
+                SlotSource s = n.slot(i);
+                if (s != null) stack.push(s.source());
+            }
+        }
+        // Preserve nodeOrder for deterministic iteration.
+        List<CompGraphNode> all = new ArrayList<>(reachable.size());
         for (Component c : nodeOrder) {
             NodeSpec s = nodes.get(c);
-            if (s != null) all.add(s.cgNode());
+            if (s != null && reachable.contains(s.cgNode())) all.add(s.cgNode());
         }
         return new ComputationGraph(all, terminalNode);
     }

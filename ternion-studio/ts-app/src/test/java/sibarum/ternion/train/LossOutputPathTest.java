@@ -151,7 +151,7 @@ final class LossOutputPathTest {
         assertEquals(TrainingState.IDLE, controller.state().get());
         String err = controller.lastError().get();
         assertNotNull(err);
-        assertTrue(err.contains("2 distinct sources"),
+        assertTrue(err.contains("2 distinct iterated sources"),
             "expected multi-source error, got: " + err);
     }
 

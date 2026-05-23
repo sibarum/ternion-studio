@@ -85,11 +85,12 @@ public final class ConfigDialog {
         for (ConfigField field : schema) {
             Object initial = initialValues.getOrDefault(field.key(), null);
             rows.add(switch (field) {
-                case IntField f      -> intRow(f, initial, readOnly, readers);
-                case DoubleField f   -> doubleRow(f, initial, readOnly, readers);
-                case BoolField f     -> boolRow(f, initial, readOnly, readers);
-                case EnumField f     -> enumRow(f, initial, readOnly, readers);
-                case IntArrayField f -> intArrayRow(f, initial, readOnly, readers);
+                case IntField f         -> intRow(f, initial, readOnly, readers);
+                case DoubleField f      -> doubleRow(f, initial, readOnly, readers);
+                case BoolField f        -> boolRow(f, initial, readOnly, readers);
+                case EnumField f        -> enumRow(f, initial, readOnly, readers);
+                case ConfigField.DynamicEnumField f -> enumRow(f.materialize(), initial, readOnly, readers);
+                case IntArrayField f    -> intArrayRow(f, initial, readOnly, readers);
             });
         }
 

@@ -26,4 +26,18 @@ public interface SourceBound {
 
     /** The number of rows available in the resolved source. */
     int rowCount();
+
+    /**
+     * Whether the trainer drives this binding's {@link #setCurrentRow}
+     * each step. {@code true} for nodes that consume cells in
+     * row-by-row lockstep (DatasetColumn, LossOutput); {@code false}
+     * for nodes that random-access the source by key (LookupColumn),
+     * which the trainer leaves alone.
+     *
+     * <p>Used by the preflight to count "iterated" sources separately
+     * from "referenced" sources, so a graph can pull from one source
+     * for its example stream and a different source as a lookup
+     * table without tripping the single-source rule.
+     */
+    default boolean iterated() { return true; }
 }

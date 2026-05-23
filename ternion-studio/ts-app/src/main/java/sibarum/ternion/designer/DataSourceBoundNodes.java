@@ -31,10 +31,13 @@ public final class DataSourceBoundNodes {
      *  messages and lets the trainer pick out the loss sink for the
      *  backward seed without re-scanning the graph. */
     public enum Role {
-        /** Graph-input column ({@link DatasetColumnPrimitive}). */
+        /** Graph-input column ({@link DatasetColumnPrimitive}). Iterated. */
         INPUT,
-        /** Supervisory target ({@link LossOutputPrimitive}). */
-        LOSS_TARGET
+        /** Supervisory target ({@link LossOutputPrimitive}). Iterated. */
+        LOSS_TARGET,
+        /** Key-indexed lookup table (e.g. {@link LookupColumnPrimitive}).
+         *  Not iterated — the trainer doesn't drive its row pointer. */
+        LOOKUP
     }
 
     /** One row in the registry. */
@@ -52,8 +55,14 @@ public final class DataSourceBoundNodes {
     public static void registerIfApplicable(NodeSpec spec) {
         if (spec == null) return;
         if (!(spec.tNode().primitive() instanceof SourceBound sb)) return;
-        Role role = (spec.tNode().primitive() instanceof LossOutputPrimitive)
-            ? Role.LOSS_TARGET : Role.INPUT;
+        Role role;
+        if (spec.tNode().primitive() instanceof LossOutputPrimitive) {
+            role = Role.LOSS_TARGET;
+        } else if (!sb.iterated()) {
+            role = Role.LOOKUP;
+        } else {
+            role = Role.INPUT;
+        }
         synchronized (LOCK) {
             BY_NODE.put(spec.cgNode(), new Binding(spec.cgNode(), sb, role));
         }
@@ -88,11 +97,27 @@ public final class DataSourceBoundNodes {
         }
     }
 
-    /** The distinct {@code sourceId}s referenced across every binding. */
+    /** The distinct {@code sourceId}s referenced across every binding —
+     *  iterated AND lookup. Used by source-removal preflight to refuse
+     *  dropping a source that any graph node still references. */
     public static Set<String> distinctSources() {
         synchronized (LOCK) {
             Set<String> out = new LinkedHashSet<>();
             for (Binding b : BY_NODE.values()) out.add(b.sourceId());
+            return out;
+        }
+    }
+
+    /** Like {@link #distinctSources()} but only iterated roles
+     *  (INPUT + LOSS_TARGET). Lookup tables are excluded — they
+     *  random-access their source and don't constrain the trainer's
+     *  single-source iteration rule. */
+    public static Set<String> distinctIteratedSources() {
+        synchronized (LOCK) {
+            Set<String> out = new LinkedHashSet<>();
+            for (Binding b : BY_NODE.values()) {
+                if (b.primitive().iterated()) out.add(b.sourceId());
+            }
             return out;
         }
     }

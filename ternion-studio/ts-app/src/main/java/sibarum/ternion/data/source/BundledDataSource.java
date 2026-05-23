@@ -1,6 +1,7 @@
 package sibarum.ternion.data.source;
 
 import sibarum.dasum.gui.core.reactive.Property;
+import sibarum.mcc.value.ValueType;
 import sibarum.ternion.data.curated.CuratedDataset;
 
 import java.util.List;
@@ -41,4 +42,7 @@ public final class BundledDataSource implements DataSource {
     @Override public String get(int row, String col)   { return dataset.get(row, col); }
     @Override public int suggestedTargetColumnIndex()  { return dataset.targetColumnIndex(); }
     @Override public Property<Integer> structureVersion() { return structureVersion; }
+    @Override public ValueType columnType(String columnName) {
+        return dataset.columnType(columnName);
+    }
 }

@@ -3,6 +3,7 @@ package sibarum.ternion.designer.config;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.function.Supplier;
 
 /**
  * Schema descriptor for one configurable field of a primitive. A
@@ -48,16 +49,50 @@ public sealed interface ConfigField {
         }
     }
 
+    /**
+     * Enum-style field whose choices + default are resolved lazily
+     * each time the {@link ConfigDialog} opens — so a source picker
+     * shows editable sources that were registered after JVM startup,
+     * not just the bundled ones baked in at palette init.
+     *
+     * <p>{@link #materialize()} snapshots the supplier into a regular
+     * {@link EnumField} for rendering; if the supplied default isn't
+     * in the supplied choices (registry drift, OOV default), it falls
+     * back to the first choice rather than throwing.
+     */
+    record DynamicEnumField(
+        String key,
+        String label,
+        Supplier<String> defaultValueSupplier,
+        Supplier<List<String>> choicesSupplier
+    ) implements ConfigField {
+
+        /** Resolve to a concrete {@link EnumField} for {@link ConfigDialog}'s
+         *  render. Both suppliers fire here. */
+        public EnumField materialize() {
+            List<String> choices = choicesSupplier.get();
+            if (choices == null || choices.isEmpty()) {
+                // Render-time fallback so the dialog stays openable
+                // even before any sources are registered.
+                choices = List.of("(none)");
+            }
+            String def = defaultValueSupplier.get();
+            if (def == null || !choices.contains(def)) def = choices.get(0);
+            return new EnumField(key, label, def, choices);
+        }
+    }
+
     /** Insertion-ordered map of defaults from a schema. */
     static Map<String, Object> defaultsOf(List<ConfigField> schema) {
         Map<String, Object> out = new LinkedHashMap<>();
         for (ConfigField f : schema) {
             out.put(f.key(), switch (f) {
-                case IntField i      -> i.defaultValue();
-                case DoubleField d   -> d.defaultValue();
-                case BoolField b     -> b.defaultValue();
-                case EnumField e     -> e.defaultValue();
-                case IntArrayField a -> a.defaultValue();
+                case IntField i        -> i.defaultValue();
+                case DoubleField d     -> d.defaultValue();
+                case BoolField b       -> b.defaultValue();
+                case EnumField e       -> e.defaultValue();
+                case DynamicEnumField d -> d.materialize().defaultValue();
+                case IntArrayField a   -> a.defaultValue();
             });
         }
         return out;

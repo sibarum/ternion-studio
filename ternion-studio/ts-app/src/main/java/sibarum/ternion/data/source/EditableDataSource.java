@@ -2,6 +2,7 @@ package sibarum.ternion.data.source;
 
 import sibarum.dasum.gui.core.event.Invalidator;
 import sibarum.dasum.gui.core.reactive.Property;
+import sibarum.mcc.value.ValueType;
 
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -31,6 +32,9 @@ public final class EditableDataSource implements DataSource {
     private int suggestedTargetColumnIndex = -1;
 
     private final List<String> columns = new ArrayList<>();
+    /** Per-column declared {@link ValueType}, parallel to {@link #columns}.
+     *  Default STRING — caller can override via {@link #setColumnType}. */
+    private final List<ValueType> columnTypes = new ArrayList<>();
     private final List<String[]> rows = new ArrayList<>();
 
     private final Property<Integer> structureVersion = new Property<>(0);
@@ -50,6 +54,7 @@ public final class EditableDataSource implements DataSource {
         this.id = id;
         this.displayLabel = (displayLabel == null || displayLabel.isBlank()) ? id : displayLabel;
         this.columns.addAll(columns);
+        for (int i = 0; i < columns.size(); i++) columnTypes.add(ValueType.STRING);
     }
 
     public EditableDataSource(String id, List<String> columns) {
@@ -78,6 +83,25 @@ public final class EditableDataSource implements DataSource {
         if (idx < 0) throw new IllegalArgumentException(
             "unknown column '" + columnName + "' (have " + columns + ")");
         return rows.get(row)[idx];
+    }
+
+    @Override
+    public ValueType columnType(String columnName) {
+        int idx = columns.indexOf(columnName);
+        return idx < 0 ? ValueType.STRING : columnTypes.get(idx);
+    }
+
+    /** Set the declared type for an existing column. New columns
+     *  default to {@link ValueType#STRING} when added via
+     *  {@link #addColumn} / {@link #insertColumn}; use this to
+     *  declare MATRIX / NUMBER columns. */
+    public void setColumnType(String columnName, ValueType type) {
+        int idx = columns.indexOf(columnName);
+        if (idx < 0) throw new IllegalArgumentException(
+            "unknown column '" + columnName + "' (have " + columns + ")");
+        if (type == null) throw new IllegalArgumentException("type");
+        columnTypes.set(idx, type);
+        bump();
     }
 
     // ---------- metadata mutators ----------
@@ -181,6 +205,7 @@ public final class EditableDataSource implements DataSource {
             throw new IllegalArgumentException("duplicate column name: " + name);
         }
         columns.add(index, name);
+        columnTypes.add(index, ValueType.STRING);
         for (int r = 0; r < rows.size(); r++) {
             String[] old = rows.get(r);
             String[] grown = new String[old.length + 1];
@@ -219,6 +244,7 @@ public final class EditableDataSource implements DataSource {
     public void removeColumn(int index) {
         if (index < 0 || index >= columns.size()) return;
         columns.remove(index);
+        columnTypes.remove(index);
         for (int r = 0; r < rows.size(); r++) {
             String[] old = rows.get(r);
             String[] shrunk = new String[old.length - 1];
@@ -247,7 +273,7 @@ public final class EditableDataSource implements DataSource {
         if (hasDuplicates(newColumns)) {
             throw new IllegalArgumentException("duplicate column names: " + newColumns);
         }
-        // Build an old-name → old-index map for value preservation.
+        // Build an old-name → old-index map for value + type preservation.
         int[] keepFromOld = new int[newColumns.size()];
         for (int i = 0; i < newColumns.size(); i++) {
             keepFromOld[i] = columns.indexOf(newColumns.get(i));
@@ -262,8 +288,17 @@ public final class EditableDataSource implements DataSource {
             }
             rows.set(r, rebuilt);
         }
+        // Preserve types for columns whose names survived; new
+        // columns default to STRING.
+        ValueType[] newTypes = new ValueType[newColumns.size()];
+        for (int i = 0; i < newTypes.length; i++) {
+            int oldIdx = keepFromOld[i];
+            newTypes[i] = (oldIdx >= 0) ? columnTypes.get(oldIdx) : ValueType.STRING;
+        }
         columns.clear();
         columns.addAll(newColumns);
+        columnTypes.clear();
+        Collections.addAll(columnTypes, newTypes);
         suggestedTargetColumnIndex = -1;
         bump();
     }
